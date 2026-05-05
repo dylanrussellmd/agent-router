@@ -20,7 +20,7 @@
  */
 
 import { spawnSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { copyFile, mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -542,16 +542,22 @@ async function main(argv: ReadonlyArray<string>): Promise<number> {
   }
 }
 
-// Detect direct invocation. Vitest imports this module; direct runs go through
-// the bin shebang.
-const isMainModule = (() => {
+// Detect direct invocation. We can't simply compare `import.meta.url` to
+// `process.argv[1]` — npm-installed bins live behind a symlink so the two
+// paths differ after Node loads the file. Compare via `realpathSync` on both
+// sides; both should resolve to the same dist/cli.js.
+function isInvokedAsScript(): boolean {
   if (!import.meta.url.startsWith("file:")) return false;
   const argv1 = process.argv[1];
   if (!argv1) return false;
-  return fileURLToPath(import.meta.url) === path.resolve(argv1);
-})();
+  try {
+    return realpathSync(fileURLToPath(import.meta.url)) === realpathSync(path.resolve(argv1));
+  } catch {
+    return false;
+  }
+}
 
-if (isMainModule) {
+if (isInvokedAsScript()) {
   main(process.argv.slice(2)).then(
     (code) => process.exit(code),
     (e) => {
