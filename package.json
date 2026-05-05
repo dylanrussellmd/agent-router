@@ -24,9 +24,16 @@
   },
   "files": [
     "dist",
+    "assets/logo.svg",
     "README.md",
     "LICENSE"
   ],
+  "homepage": "https://github.com/dylanrussellmd/omo-router#readme",
+  "bugs": "https://github.com/dylanrussellmd/omo-router/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dylanrussellmd/omo-router.git"
+  },
   "scripts": {
     "build": "tsup",
     "typecheck": "tsc --noEmit",
