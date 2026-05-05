@@ -1,0 +1,77 @@
+{
+  "name": "@dylanrussell/omo-router",
+  "version": "0.1.0",
+  "description": "Switch between named stacks of oh-my-openagent.json model assignments. Plugin + CLI for opencode.",
+  "license": "MIT",
+  "author": "Dylan Russell",
+  "type": "module",
+  "main": "./dist/plugin.js",
+  "module": "./dist/plugin.js",
+  "types": "./dist/plugin.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js"
+    },
+    "./cli": {
+      "types": "./dist/cli.d.ts",
+      "import": "./dist/cli.js"
+    }
+  },
+  "bin": {
+    "omo-router": "./dist/cli.js",
+    "omo": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src tests",
+    "lint:fix": "biome check --write src tests",
+    "format": "biome format --write src tests",
+    "test": "vitest run --coverage",
+    "test:unit": "vitest run tests/unit",
+    "test:cli": "vitest run tests/cli",
+    "test:plugin": "vitest run tests/plugin",
+    "test:seeds": "vitest run tests/seeds",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run test"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "^1.14.0"
+  },
+  "peerDependenciesMeta": {
+    "@opencode-ai/plugin": { "optional": true }
+  },
+  "dependencies": {
+    "cac": "^6.7.14",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@opencode-ai/plugin": "^1.14.33",
+    "@types/node": "^20.14.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "oh-my-openagent",
+    "oh-my-opencode",
+    "model-router",
+    "llm-router"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}

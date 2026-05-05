@@ -1,0 +1,15 @@
+src/
+tests/
+node_modules/
+coverage/
+.tsup/
+.git/
+.gitignore
+.npmignore
+biome.jsonc
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+*.log
+.DS_Store
+.env*
