@@ -58,18 +58,22 @@ Then **restart opencode** so it picks up the plugin.
 ## Quickstart
 
 ```bash
+omo-router add my-mix --from-active   # snapshot current oh-my-openagent.json as a new stack
+omo-router back                       # undo the most recent switch
+omo-router completion                 # install shell autocompletion scripts
+omo-router edit my-mix                # open in $EDITOR
+omo-router export my-mix              # export a stack to a file
+omo-router history                    # list recent switches
+omo-router import my-mix <file>       # import a stack from a file
+omo-router init                       # initialize omo-router (creates seed stacks, backups)
 omo-router list                       # show stacks; * marks active
+omo-router path                       # print all paths used (debugging)
+omo-router rm my-mix                  # remove a stack
+omo-router restore <history-id>       # revert oh-my-openagent.json to a prior state
+omo-router show free-only             # print the JSON of a stack
 omo-router status                     # print active stack name
 omo-router use openrouter-cheap       # switch (validates first)
-# now restart opencode for the new stack to take effect
-omo-router back                       # undo the most recent switch
 omo-router validate --all             # check every stack against `opencode models`
-omo-router show free-only             # print the JSON of a stack
-omo-router add my-mix --from-active   # snapshot current oh-my-openagent.json as a new stack
-omo-router edit my-mix                # open in $EDITOR
-omo-router history                    # list recent switches
-omo-router restore <history-id>       # revert oh-my-openagent.json to a prior state
-omo-router path                       # print all paths used (debugging)
 ```
 
 You can also alias to `omo` — `omo use premium` works the same.
