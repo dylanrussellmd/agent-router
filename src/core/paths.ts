@@ -31,6 +31,13 @@ export interface OmoPaths {
   /** `${opencodeConfigDir}/opencode.json`. */
   readonly opencodeJsonPath: string;
   /**
+   * `${opencodeConfigDir}/tui.json` — opencode's TUI config. Since opencode
+   * 1.17 the TUI loads its plugins from THIS file's `plugin` array, not from
+   * `opencode.json`. `init` patches both so the sidebar half of omo-router
+   * loads alongside the server half.
+   */
+  readonly tuiJsonPath: string;
+  /**
    * The live router target — the `oh-my-openagent.json` written on every
    * switch. Defaults to `${opencodeConfigDir}/oh-my-openagent.json`; override
    * with `OMO_ROUTER_LIVE_CONFIG` (or `options.liveConfigPath`).
@@ -105,6 +112,7 @@ export function resolvePaths(options: ResolvePathsOptions = {}): OmoPaths {
   return {
     opencodeConfigDir,
     opencodeJsonPath: path.join(opencodeConfigDir, "opencode.json"),
+    tuiJsonPath: path.join(opencodeConfigDir, "tui.json"),
     liveConfigPath,
     opencodeBackupsDir: path.join(opencodeConfigDir, ".backups"),
     omoHome,

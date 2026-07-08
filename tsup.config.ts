@@ -11,6 +11,7 @@ export default defineConfig({
   entry: {
     plugin: "src/plugin.ts",
     cli: "src/cli.ts",
+    tui: "src/tui/index.ts",
   },
   format: ["esm"],
   target: "node20",
@@ -20,8 +21,9 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   shims: false,
-  // Bundle our deps; mark opencode plugin types as external (peer dep).
-  external: ["@opencode-ai/plugin"],
+  // Bundle our deps; mark opencode plugin types as external (peer dep) and
+  // @opentui/solid as external (the opencode TUI host provides it at runtime).
+  external: ["@opencode-ai/plugin", "@opentui/solid"],
   // Copy seed JSON into dist/seeds so the published package can read them.
   // tsup's `loader` covers code; for static assets we use a custom hook.
   async onSuccess() {

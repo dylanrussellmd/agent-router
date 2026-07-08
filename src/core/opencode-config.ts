@@ -24,27 +24,37 @@ export const PLUGIN_REGISTRY_ENTRY = `${PLUGIN_NPM_NAME}@latest`;
 
 /** Read opencode.json. Returns null if absent. Throws on parse/schema error. */
 export async function readOpencodeJson(opencodeJsonPath: string): Promise<OpencodeJson | null> {
-  if (!existsSync(opencodeJsonPath)) return null;
+  return readPluginConfigFile(opencodeJsonPath, "opencode.json");
+}
+
+/**
+ * Read tui.json — opencode's TUI config. Same loose schema as opencode.json;
+ * the TUI (opencode >= 1.17) loads its plugins from THIS file's `plugin`
+ * array, so omo-router's sidebar half must be registered here.
+ */
+export async function readTuiJson(tuiJsonPath: string): Promise<OpencodeJson | null> {
+  return readPluginConfigFile(tuiJsonPath, "tui.json");
+}
+
+async function readPluginConfigFile(filePath: string, label: string): Promise<OpencodeJson | null> {
+  if (!existsSync(filePath)) return null;
   let raw: string;
   try {
-    raw = await readFile(opencodeJsonPath, "utf8");
+    raw = await readFile(filePath, "utf8");
   } catch (cause) {
-    throw new IOError(`Failed to read ${opencodeJsonPath}: ${(cause as Error).message}`, cause);
+    throw new IOError(`Failed to read ${filePath}: ${(cause as Error).message}`, cause);
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch (cause) {
-    throw new ValidationError(
-      `opencode.json is not valid JSON: ${(cause as Error).message}`,
-      opencodeJsonPath,
-    );
+    throw new ValidationError(`${label} is not valid JSON: ${(cause as Error).message}`, filePath);
   }
   const result = OpencodeJsonSchema.safeParse(parsed);
   if (!result.success) {
     throw new ValidationError(
-      `opencode.json failed validation: ${result.error.issues.map((i) => i.message).join("; ")}`,
-      opencodeJsonPath,
+      `${label} failed validation: ${result.error.issues.map((i) => i.message).join("; ")}`,
+      filePath,
       result.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`),
     );
   }
@@ -144,4 +154,24 @@ export async function writeOpencodeJson(
   config: OpencodeJson,
 ): Promise<void> {
   await atomicWriteJson(opencodeJsonPath, config);
+}
+
+const TUI_JSON_SCHEMA_URL = "https://opencode.ai/config.json";
+
+/**
+ * Ensure tui.json exists and lists `entry` in its `plugin` array so the TUI
+ * half of omo-router loads. Creates the file when absent. Idempotent.
+ * Returns whether an entry was added (callers back up before calling when the
+ * file already exists).
+ */
+export async function ensureTuiJsonPluginEntry(
+  tuiJsonPath: string,
+  entry: string = PLUGIN_REGISTRY_ENTRY,
+): Promise<EnsurePluginEntryResult> {
+  const existing = (await readTuiJson(tuiJsonPath)) ?? { $schema: TUI_JSON_SCHEMA_URL };
+  const { config, result } = ensurePluginEntry(existing, entry);
+  if (result.added) {
+    await atomicWriteJson(tuiJsonPath, config);
+  }
+  return result;
 }

@@ -51,7 +51,8 @@ npx -y @dylanrussell/omo-router init
 2. Drop three seed stacks (`premium`, `openrouter-cheap`, `free-only`) into `~/.config/opencode/omo-router/stacks/`.
 3. Set `premium` active and copy it to `oh-my-openagent.json`.
 4. Add `@dylanrussell/omo-router@latest` to the `plugin` array in `opencode.json`.
-5. Add the OpenRouter model IDs the seed stacks need to `provider.openrouter.models`.
+5. Add `@dylanrussell/omo-router@latest` to the `plugin` array in `tui.json` — this loads the sidebar + `/omo-*` commands (opencode ≥ 1.17).
+6. Add the OpenRouter model IDs the seed stacks need to `provider.openrouter.models`.
 
 Then **restart opencode** so it picks up the plugin.
 
@@ -91,6 +92,26 @@ The plugin exposes five tools the agent (or you, by asking it) can call:
 | `omo_validate({name?, active?})` | check model IDs against current opencode auth |
 
 > *"Switch to openrouter-cheap"* — your agent calls `omo_use`, the toast pops up, you restart opencode.
+
+## In the TUI
+
+On opencode ≥ 1.17 the plugin also ships a TUI half (loaded from `tui.json`, wired up by `init`):
+
+- **Sidebar panel** — always shows the active stack, the stack count, and a `⟳ restart required` badge after any switch. Updates live (≤1.5s) when the CLI or agent switches stacks underneath the TUI.
+- **Commands** — type `/` or open the command palette:
+
+| command | what it does |
+|---|---|
+| `/omo-switch` (alias `/omo`) | pick a stack, validate, switch |
+| `/omo-view` | browse a stack's agent/category → model assignments |
+| `/omo-edit` | reassign a model, picking from your reachable model catalog |
+| `/omo-back` | confirm + revert to the previous stack |
+| `/omo-validate` | check a stack's model IDs against current auth |
+| `/omo-status` | toast the active stack + list |
+
+Everything degrades gracefully: on older opencode versions (or if the TUI API changes) the sidebar and commands simply don't appear — the CLI and agent tools keep working.
+
+Debugging the TUI half: `OMO_TUI_DEBUG=/tmp/omo-tui.log opencode` writes a trace of the plugin's init steps.
 
 ## ⚠ Things to know
 

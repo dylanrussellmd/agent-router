@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/omo-router",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "Switch between named stacks of oh-my-openagent.json model assignments. Plugin + CLI for opencode.",
   "license": "MIT",
   "author": "Dylan Russell",
@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/plugin.d.ts",
       "import": "./dist/plugin.js"
+    },
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     },
     "./cli": {
       "types": "./dist/cli.d.ts",
@@ -62,7 +66,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@opencode-ai/plugin": "^1.14.33",
+    "@opencode-ai/plugin": "^1.17.15",
     "@types/node": "^20.14.0",
     "@vitest/coverage-v8": "^4.1.5",
     "tsup": "^8.5.1",

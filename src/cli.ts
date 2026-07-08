@@ -40,6 +40,7 @@ import {
   PLUGIN_REGISTRY_ENTRY,
   ensureOpenrouterModels,
   ensurePluginEntry,
+  ensureTuiJsonPluginEntry,
   readOpencodeJson,
   writeOpencodeJson,
 } from "./core/opencode-config.js";
@@ -147,12 +148,31 @@ async function cmdInit(paths: OmoPaths, opts: InitOptions): Promise<void> {
   }
 
   if (opts.noEditOpencodeJson) {
-    log("omo-router: --no-edit-opencode-json passed; not editing opencode.json");
+    log("omo-router: --no-edit-opencode-json passed; not editing opencode.json or tui.json");
     log(`  add this to opencode.json plugin[]: "${PLUGIN_REGISTRY_ENTRY}"`);
+    log(`  add this to tui.json plugin[] (sidebar): "${PLUGIN_REGISTRY_ENTRY}"`);
     return;
   }
 
   await editOpencodeJson(paths);
+  await editTuiJson(paths);
+}
+
+/**
+ * Register the TUI half in tui.json — opencode >= 1.17 loads TUI plugins
+ * (sidebar, commands) from tui.json's `plugin` array, not opencode.json's.
+ */
+async function editTuiJson(paths: OmoPaths): Promise<void> {
+  const exists = existsSync(paths.tuiJsonPath);
+  if (exists) {
+    await backupFiles(paths.opencodeBackupsDir, [paths.tuiJsonPath]);
+  }
+  const result = await ensureTuiJsonPluginEntry(paths.tuiJsonPath);
+  if (result.added) {
+    log(`omo-router: added "${PLUGIN_REGISTRY_ENTRY}" to tui.json plugin[] (sidebar support)`);
+    return;
+  }
+  log("omo-router: tui.json already up to date");
 }
 
 /**
