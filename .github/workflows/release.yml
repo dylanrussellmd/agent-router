@@ -33,10 +33,12 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           # Never cache deps in a release build (supply-chain hygiene).
 
-      # Trusted Publishing (OIDC) requires npm >= 11.5.1. The npm bundled with
-      # node 24 is older, so pin a known-good modern npm explicitly.
+      # Trusted Publishing (OIDC) requires npm >= 11.5.1. Pinned to the 11.x
+      # line: npm@12.0.0 ships a broken provenance path on hosted runners
+      # (MODULE_NOT_FOUND: 'sigstore' from libnpmpublish — broke the v0.2.0
+      # release). Revisit the pin once npm 12 publishes cleanly.
       - name: upgrade npm (OIDC support)
-        run: npm install -g npm@latest
+        run: npm install -g npm@11
 
       - name: install (frozen)
         run: pnpm install --frozen-lockfile=false
