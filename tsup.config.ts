@@ -20,9 +20,15 @@ export default defineConfig({
   sourcemap: true,
   splitting: false,
   shims: false,
-  // Bundle our deps; mark opencode plugin types as external (peer dep) and
-  // @opentui/solid as external (the opencode TUI host provides it at runtime).
+  // Self-contained bundles: tsup externalizes everything in `dependencies`
+  // by default, so zod/cac must be forced inline via `noExternal` — otherwise
+  // a partial dep install in opencode's plugin cache breaks every entry point
+  // at load time (`Cannot find package 'zod'` → no sidebar/commands/toasts).
+  // Only host-provided modules stay external: @opencode-ai/plugin (peer dep,
+  // resolved by the opencode plugin loader) and @opentui/solid (provided by
+  // the opencode TUI runtime).
   external: ["@opencode-ai/plugin", "@opentui/solid"],
+  noExternal: ["zod", "cac"],
   async onSuccess() {
     // Add shebang + executable bit to dist/cli.js so the bin works.
     const { readFile, writeFile } = await import("node:fs/promises");
