@@ -35,7 +35,7 @@ export function restartRequired(snapshot: StackSnapshot, ctx: SidebarContext): b
 export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext): ViewNode[] {
   const theme = ctx.theme ?? {};
   const nodes: ViewNode[] = [
-    text("agent-router", { fg: theme.textMuted }),
+    text("Agent Stack", { fg: theme.text, attributes: TextAttributes.BOLD }),
     text(` ▣ ${snapshot.active ?? "(none)"}`, { fg: theme.success }),
   ];
   if (restartRequired(snapshot, ctx)) {
