@@ -1,5 +1,6 @@
 src/
 tests/
+scripts/
 node_modules/
 coverage/
 .tsup/
