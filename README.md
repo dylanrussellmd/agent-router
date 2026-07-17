@@ -29,28 +29,29 @@ opencode agents are markdown files (`~/.config/opencode/agents/*.md`) whose YAML
 ---
 description: High-reasoning review, debugging, and architecture counsel
 mode: subagent
-model: anthropic/claude-opus-4-8        # ← the ONLY line agent-router touches
+model: anthropic/claude-opus-4-8        # ← agent-router rewrites this
+reasoningEffort: high                   # ← and any option keys a stack names
 temperature: 0.1
 tools: { write: false, edit: false }
 ---
 <prompt body — owned by you, never touched by agent-router>
 ```
 
-`agent-router` keeps named **stacks** — JSON files mapping agent names to models — and applies them to those `model:` lines on demand. Premium models for the workday, cheap ones for bulk chores, one command to swap the whole crew:
+`agent-router` keeps named **stacks** — JSON files mapping agent names to models (and optionally to provider options) — and applies them to those frontmatter lines on demand. Premium models for the workday, cheap ones for bulk chores, one command to swap the whole crew:
 
 ```json
 {
   "agents": {
     "Omni":      { "model": "anthropic/claude-fable-5" },
-    "oracle":    { "model": "openai/gpt-5.5" },
+    "oracle":    { "model": "openai/gpt-5.5", "reasoningEffort": "high" },
     "explorer":  { "model": "openai/gpt-5.4-mini" },
     "librarian": { "model": "openai/gpt-5.4-mini" },
-    "fixer":     { "model": "openai/gpt-5.5" }
+    "fixer":     { "model": "openai/gpt-5.5", "thinking": { "effort": "low" } }
   }
 }
 ```
 
-The prompt body and every other frontmatter key are yours; agent-router rewrites exactly one line per agent, atomically, through symlinks (dotfile-manager setups survive intact).
+The prompt body and opencode framework keys (`description`, `mode`, `permission`, `tools`, …) are yours; agent-router rewrites only the `model:` line and the option keys a stack entry names, atomically, through symlinks (dotfile-manager setups survive intact).
 
 ```
 ~/.config/opencode/
@@ -104,11 +105,27 @@ The everyday loop: tune your agents until you like them → `capture <name>` →
 
 ## Stacks
 
-A stack file needs one thing: an `agents` record whose entries carry a `model` string. Agent names are the `.md` basenames in your agents dir (`Omni` ↔ `Omni.md`). Unknown keys are preserved round-trip.
+A stack file needs one thing: an `agents` record whose entries carry a `model` string. Agent names are the `.md` basenames in your agents dir (`Omni` ↔ `Omni.md`). Any **other key** on an entry is a provider pass-through option (`reasoningEffort`, `thinking`, `temperature`, `topP`, `maxOutputTokens`, …) that opencode forwards to the model — agent-router transcribes these to the agent's frontmatter alongside `model:` and captures them back. Unknown keys are preserved round-trip.
+
+```json
+{
+  "agents": {
+    "oracle": {
+      "model": "openai/gpt-5.5",
+      "reasoningEffort": "high",
+      "thinking": { "effort": "low" }
+    }
+  }
+}
+```
+
+- **Apply** writes/updates only the option keys a stack entry names; options the stack omits are left in place. To **clear** an option, set it to `null` in the stack entry.
+- Reserved opencode framework keys (`description`, `mode`, `permission`, `tools`, `prompt`, `steps`, `color`, `name`) are never transcribed — a stack entry can't clobber them.
+- Option values serialize to a single frontmatter line: scalars bare (quoted only when needed), objects/arrays as JSON flow. Block-style values an apply replaces are collapsed to flow; `capture` parses them back into typed JSON.
 
 `use` is strict by design: if a stack references an agent file that doesn't exist, or one without a `model:` line, the switch fails **before anything is written** — your suite is never left half-switched. It also validates every model ID against `opencode models` first (skip with `--no-validate`, override with `--force-invalid`).
 
-`capture` is the inverse: it reads the current `model:` line of every agent file (files without one are skipped) and writes a stack. There are no bundled seed stacks — your real setup is the seed.
+`capture` is the inverse: it reads the current `model:` line and option keys of every agent file (files without a `model:` line are skipped) and writes a stack. There are no bundled seed stacks — your real setup is the seed.
 
 ## Inside opencode
 
@@ -167,12 +184,12 @@ Paths resolve in this order: explicit option → `config.json` → env var → d
 ## ⚠ Things to know
 
 - **Restart required.** opencode reads agent files once at startup. After every `agent-router use`, restart opencode for the new models to take effect. The CLI reminds you.
-- **Hand-edits to frontmatter are not auto-saved into stacks.** If you hand-tune a model and want to keep it, `capture` it (or `capture <active> --force`). The next `use` that touches that agent overwrites the hand-edit.
+- **Hand-edits to frontmatter are not auto-saved into stacks.** If you hand-tune a model or option and want to keep it, `capture` it (or `capture <active> --force`). The next `use` that touches that agent overwrites the hand-edit for keys the stack names; keys the stack omits are preserved (set an option to `null` in a stack entry to clear it).
 - **Validation is auth-state-dependent.** `agent-router validate` runs `opencode models`, which only lists models reachable through your current auth. If you revoke a key, previously-valid stacks may suddenly be invalid.
 
 ## FAQ
 
-**Why no variants/fallback models?** Native agent frontmatter has a single `model:` line. If you want a fallback, make it a stack (`cheap`, `free`) and switch to it.
+**Why no variants/fallback models?** Native agent frontmatter has a single `model:` line. If you want a fallback, make it a stack (`cheap`, `free`) and switch to it. For per-stack *behavior* variants (reasoning effort, thinking budget, temperature, …), add the option as a sibling key on the stack entry — it transcribes to frontmatter on `use`.
 
 **Can I have per-project stacks?** Point `AGENT_ROUTER_STACKS_DIR` at a project-local directory in that project's shell env.
 

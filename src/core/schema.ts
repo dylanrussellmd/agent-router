@@ -36,7 +36,12 @@ export type StateFile = z.infer<typeof StateFileSchema>;
 
 /**
  * The smallest commitment a stack entry makes: it must have a `model` string.
- * Unknown keys ride along unchanged.
+ * Any other key is a provider pass-through option (`reasoningEffort`,
+ * `thinking`, `temperature`, …) that agent-router transcribes to the agent
+ * file's frontmatter alongside `model`. Unknown keys ride along unchanged so
+ * future additions survive round-trips; reserved opencode framework keys
+ * (`description`, `permission`, `tools`, …) are filtered out by the apply
+ * path and never written to frontmatter.
  */
 export const AgentEntrySchema = z
   .object({

@@ -9,7 +9,7 @@ import {
   UserError,
   ValidationError,
 } from "../../src/core/errors.js";
-import { getFrontmatterModel } from "../../src/core/frontmatter.js";
+import { getFrontmatterModel, getFrontmatterOptions } from "../../src/core/frontmatter.js";
 import { listHistory } from "../../src/core/history.js";
 import type { RouterPaths } from "../../src/core/paths.js";
 import { resolvePaths } from "../../src/core/paths.js";
@@ -65,6 +65,14 @@ afterEach(() => {
 
 function agentModel(name: string): string | null {
   return getFrontmatterModel(readFileSync(path.join(paths.agentsDir, `${name}.md`), "utf8"));
+}
+
+function agentOptions(name: string): Record<string, unknown> {
+  return getFrontmatterOptions(readFileSync(path.join(paths.agentsDir, `${name}.md`), "utf8"));
+}
+
+function agentRaw(name: string): string {
+  return readFileSync(path.join(paths.agentsDir, `${name}.md`), "utf8");
 }
 
 describe("listStacks / readStack", () => {
@@ -222,9 +230,11 @@ describe("captureStack", () => {
     const r = await captureStack(paths, "snap");
     expect(r.agents).toBe(2);
     const stack = await readStack(paths, "snap");
+    // The fixture's `temperature: 0.1` is a provider option, so capture now
+    // transcribes it alongside model. Reserved keys (description/mode) are not.
     expect(stack.agents).toEqual({
-      Omni: { model: "a/one" },
-      oracle: { model: "b/two" },
+      Omni: { model: "a/one", temperature: 0.1 },
+      oracle: { model: "b/two", temperature: 0.1 },
     });
   });
 
@@ -247,6 +257,131 @@ describe("captureStack", () => {
     });
     mkdirSync(p.agentsDir, { recursive: true });
     await expect(captureStack(p, "nothing")).rejects.toBeInstanceOf(UserError);
+  });
+});
+
+describe("applyStack — option transcription", () => {
+  it("writes option keys from the stack entry into frontmatter", async () => {
+    writeFileSync(
+      stackPath(paths, "effort"),
+      JSON.stringify({
+        agents: {
+          Omni: { model: "a/one", reasoningEffort: "high", thinking: { budget_tokens: 8000 } },
+        },
+      }),
+    );
+    await applyStack(paths, "effort", { validateOptions: ALLOW_ALL });
+    expect(agentModel("Omni")).toBe("a/one");
+    expect(agentOptions("Omni")).toMatchObject({
+      temperature: 0.1, // preserved — stack didn't name it
+      reasoningEffort: "high",
+      thinking: { budget_tokens: 8000 },
+    });
+  });
+
+  it("does not write reserved framework keys even if present in the stack entry", async () => {
+    writeFileSync(
+      stackPath(paths, "reserved"),
+      JSON.stringify({
+        agents: {
+          Omni: { model: "a/one", description: "should not clobber", permission: { edit: "deny" } },
+        },
+      }),
+    );
+    await applyStack(paths, "reserved", { validateOptions: ALLOW_ALL });
+    expect(agentOptions("Omni")).not.toHaveProperty("description");
+    expect(agentOptions("Omni")).not.toHaveProperty("permission");
+    // original description line intact
+    expect(agentRaw("Omni")).toContain("description: Omni agent");
+  });
+
+  it("removes an option when the stack entry sets it to null", async () => {
+    // Seed temperature-free agent via a stack that sets temperature then nulls it.
+    writeFileSync(
+      stackPath(paths, "set"),
+      JSON.stringify({ agents: { oracle: { model: "b/two", reasoningEffort: "high" } } }),
+    );
+    await applyStack(paths, "set", { validateOptions: ALLOW_ALL });
+    expect(agentOptions("oracle").reasoningEffort).toBe("high");
+    writeFileSync(
+      stackPath(paths, "clear"),
+      JSON.stringify({ agents: { oracle: { model: "b/two", reasoningEffort: null } } }),
+    );
+    await applyStack(paths, "clear", { validateOptions: ALLOW_ALL });
+    expect(agentOptions("oracle")).not.toHaveProperty("reasoningEffort");
+  });
+
+  it("leaves existing options untouched when the stack entry has none", async () => {
+    writeFileSync(
+      stackPath(paths, "modelonly"),
+      JSON.stringify({ agents: { Omni: { model: "b/two" } } }),
+    );
+    await applyStack(paths, "modelonly", { validateOptions: ALLOW_ALL });
+    expect(agentModel("Omni")).toBe("b/two");
+    // temperature: 0.1 from fixture survives a model-only stack
+    expect(agentOptions("Omni")).toMatchObject({ temperature: 0.1 });
+  });
+
+  it("is idempotent: applying the same stack twice writes nothing the second time", async () => {
+    writeFileSync(
+      stackPath(paths, "idem"),
+      JSON.stringify({ agents: { Omni: { model: "b/two", reasoningEffort: "high" } } }),
+    );
+    const first = await applyStack(paths, "idem", { validateOptions: ALLOW_ALL });
+    expect(first.changed).toEqual(["Omni"]);
+    const second = await applyStack(paths, "idem", { validateOptions: ALLOW_ALL });
+    expect(second.changed).toEqual([]);
+  });
+
+  it("preserves everything outside touched option/model lines byte-for-byte", async () => {
+    const before = agentRaw("oracle");
+    writeFileSync(
+      stackPath(paths, "touch"),
+      JSON.stringify({ agents: { oracle: { model: "b/two", reasoningEffort: "medium" } } }),
+    );
+    await applyStack(paths, "touch", { validateOptions: ALLOW_ALL });
+    const after = agentRaw("oracle");
+    const filter = (l: string) =>
+      !l.startsWith("model:") && !l.startsWith("reasoningEffort:") && !l.startsWith("temperature:");
+    expect(after.split("\n").filter(filter)).toEqual(before.split("\n").filter(filter));
+  });
+
+  it("capture then apply round-trips options", async () => {
+    // Seed options via apply, then capture and re-apply on a clean agent.
+    writeFileSync(
+      stackPath(paths, "seed"),
+      JSON.stringify({
+        agents: {
+          oracle: { model: "b/two", reasoningEffort: "high", thinking: { effort: "low" } },
+        },
+      }),
+    );
+    await applyStack(paths, "seed", { validateOptions: ALLOW_ALL });
+    await captureStack(paths, "roundtrip", { force: true });
+    const captured = await readStack(paths, "roundtrip");
+    expect(captured.agents.oracle).toMatchObject({
+      model: "b/two",
+      reasoningEffort: "high",
+      thinking: { effort: "low" },
+      temperature: 0.1,
+    });
+    // Wipe options by nulling, then re-apply captured stack to restore them.
+    writeFileSync(
+      stackPath(paths, "wipe"),
+      JSON.stringify({
+        agents: {
+          oracle: { model: "b/two", reasoningEffort: null, thinking: null, temperature: null },
+        },
+      }),
+    );
+    await applyStack(paths, "wipe", { validateOptions: ALLOW_ALL });
+    expect(agentOptions("oracle")).toEqual({});
+    await applyStack(paths, "roundtrip", { validateOptions: ALLOW_ALL });
+    expect(agentOptions("oracle")).toMatchObject({
+      reasoningEffort: "high",
+      thinking: { effort: "low" },
+      temperature: 0.1,
+    });
   });
 });
 

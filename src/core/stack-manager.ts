@@ -27,7 +27,14 @@ import {
   UserError,
   ValidationError,
 } from "./errors.js";
-import { readAgentFileStrict, readAgentModels, setFrontmatterModel } from "./frontmatter.js";
+import {
+  type AgentEntry,
+  RESERVED_AGENT_KEYS,
+  readAgentEntries,
+  readAgentFileStrict,
+  setFrontmatterModel,
+  setFrontmatterOptions,
+} from "./frontmatter.js";
 import { appendHistory, listHistory, trimHistory } from "./history.js";
 import type { RouterPaths } from "./paths.js";
 import { type StackFile, StackFileSchema } from "./schema.js";
@@ -130,9 +137,12 @@ export interface ApplyResult {
  *   3. STRICT PRE-FLIGHT: read every agent file the stack references. Any
  *      missing file or missing `model:` line aborts BEFORE any write — the
  *      suite is never left half-switched.
- *   4. Append the displaced mapping (current models of ALL agent files, as a
- *      capture-shaped JSON) to history.
- *   5. Atomic-write each agent file whose model differs from the target.
+ *   4. Append the displaced mapping (current models + options of ALL agent
+ *      files, as a capture-shaped JSON) to history.
+ *   5. Atomic-write each agent file whose frontmatter would change. Both the
+ *      `model:` line and any option keys the stack entry names are rewritten;
+ *      option keys absent from the stack entry are left in place (to clear an
+ *      option, set it to `null` in the stack entry).
  *   6. Update state.json.
  *   7. Trim history to 20.
  */
@@ -153,17 +163,20 @@ export async function applyStack(
   const pending: Array<{ agent: string; filePath: string; next: string | null }> = [];
   for (const [agent, entry] of Object.entries(target.agents)) {
     const { filePath, content, model } = await readAgentFileStrict(paths.agentsDir, agent);
-    pending.push({
-      agent,
-      filePath,
-      next: model === entry.model ? null : setFrontmatterModel(content, entry.model),
-    });
+    // Options first (line-preserving), then model. Each returns the SAME
+    // content reference when it would change nothing, so a no-op entry
+    // (same model, no option diffs) yields `next === null` and skips writing.
+    const wantOptions = entryOptions(entry);
+    const afterOptions = setFrontmatterOptions(content, wantOptions);
+    const nextContent =
+      entry.model === model ? afterOptions : setFrontmatterModel(afterOptions, entry.model);
+    pending.push({ agent, filePath, next: nextContent === content ? null : nextContent });
   }
 
   const prevState = await readState(paths.statePath);
   const prevActive = prevState?.active ?? null;
 
-  const displaced = { agents: modelsToStackAgents(await readAgentModels(paths.agentsDir)) };
+  const displaced = { agents: entriesToStackAgents(await readAgentEntries(paths.agentsDir)) };
   const historyId = await appendHistory(
     paths.historyDir,
     prevActive ?? "(none)",
@@ -196,11 +209,41 @@ export async function applyStack(
   };
 }
 
-function modelsToStackAgents(models: Record<string, string>): Record<string, { model: string }> {
-  const out: Record<string, { model: string }> = {};
-  for (const k of Object.keys(models).sort()) {
-    const model = models[k];
-    if (model !== undefined) out[k] = { model };
+/**
+ * Extract the transcribable option keys from a stack entry. `model` is handled
+ * by its own path; {@link RESERVED_AGENT_KEYS} (opencode framework config such
+ * as `description`, `permission`, `tools`) are stripped so a stack entry can
+ * never accidentally clobber framework fields. Everything else is treated as
+ * a provider pass-through option and written to frontmatter on apply.
+ */
+function entryOptions(entry: { model: string }): Record<string, unknown> {
+  const rec = entry as unknown as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(rec)) {
+    if (k === "model" || RESERVED_AGENT_KEYS.has(k)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Build a capture-shaped `agents` record from live frontmatter entries: each
+ * agent maps to `{ model, ...options }`, with options spread as top-level
+ * sibling keys (matching the opencode.json agent-config shape and the
+ * frontmatter shape). Agents are emitted in sorted name order for stable
+ * diffs and history.
+ */
+function entriesToStackAgents(
+  entries: Record<string, AgentEntry>,
+): Record<string, Record<string, unknown>> {
+  const out: Record<string, Record<string, unknown>> = {};
+  for (const name of Object.keys(entries).sort()) {
+    const entry = entries[name];
+    if (!entry) continue;
+    const { model, options } = entry;
+    const stackEntry: Record<string, unknown> = { model };
+    for (const [k, v] of Object.entries(options)) stackEntry[k] = v;
+    out[name] = stackEntry;
   }
   return out;
 }
@@ -270,9 +313,10 @@ export interface CaptureResult {
 }
 
 /**
- * Snapshot the current frontmatter models of every agent file into a new
- * stack. This replaces both the old snapshot-back concept and seed stacks —
- * your real, working setup is always one `capture` away from being a stack.
+ * Snapshot the current frontmatter models AND option keys of every agent file
+ * into a new stack. This replaces both the old snapshot-back concept and seed
+ * stacks — your real, working setup is always one `capture` away from being a
+ * stack.
  */
 export async function captureStack(
   paths: RouterPaths,
@@ -284,8 +328,8 @@ export async function captureStack(
   if (existsSync(dest) && !options.force) {
     throw new UserError(`Stack "${name}" already exists. Use --force to overwrite.`);
   }
-  const models = await readAgentModels(paths.agentsDir);
-  const agents = modelsToStackAgents(models);
+  const entries = await readAgentEntries(paths.agentsDir);
+  const agents = entriesToStackAgents(entries);
   if (Object.keys(agents).length === 0) {
     throw new UserError(
       `No agent .md files with a frontmatter \`model:\` line found in ${paths.agentsDir}.`,

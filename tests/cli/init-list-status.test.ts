@@ -20,7 +20,10 @@ describe("agent-router init", () => {
     expect(r.stdout).toContain("captured 2 agents");
 
     const stack = JSON.parse(readFileSync(path.join(fx.stacksDir, "default.json"), "utf8"));
-    expect(stack.agents).toEqual({ Omni: { model: "a/one" }, oracle: { model: "b/two" } });
+    expect(stack.agents).toEqual({
+      Omni: { model: "a/one", temperature: 0.1 },
+      oracle: { model: "b/two", temperature: 0.1 },
+    });
 
     const opencodeJson = JSON.parse(
       readFileSync(path.join(fx.opencodeConfigDir, "opencode.json"), "utf8"),
