@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/agent-router",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "Switch the models assigned to your opencode agents. Named stacks applied to agent frontmatter. Plugin + CLI.",
   "license": "MIT",
   "author": "Dylan Russell",
