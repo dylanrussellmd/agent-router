@@ -4,7 +4,124 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 import AgentRouterPlugin from "../../src/plugin.js";
 
+it("deterministic provider harness continues only on explicit next turn without replay or persistent writes", async () => {
+  const fixture = setup();
+  try {
+    writeFileSync(
+      path.join(fixture.stacksDir, "fallback.json"),
+      JSON.stringify({
+        agents: {
+          Omni: { model: "a/one", fallbacks: [{ model: "b/two", variant: "low" }] },
+        },
+      }),
+    );
+    const client = makeFakeClient();
+    const installer = (await AgentRouterPlugin(fakeCtx(client))) as unknown as PluginReturn;
+    const use = installer.tool.router_use;
+    if (!use) throw Error("router_use missing");
+    await call(use, { name: "fallback" });
+    const hooks = await AgentRouterPlugin(fakeCtx(client));
+    const statePath = path.join(fixture.stacksDir, "..", "state.json");
+    const stateBefore = readFileSync(statePath, "utf8");
+    const agentBefore = readFileSync(path.join(fixture.agentsDir, "Omni.md"), "utf8");
+    const requests: string[] = [];
+    const completedTools: string[] = [];
+    const transcript: string[] = [];
+    const send = async (id: string) => {
+      const output = {
+        message: {
+          id,
+          sessionID: "session",
+          role: "user",
+          agent: "Omni",
+          time: { created: 1 },
+          model: { providerID: "a", modelID: "one" },
+        },
+        parts: [],
+      };
+      if (!hooks["chat.message"] || !hooks.event) throw Error("failover hooks missing");
+      await hooks["chat.message"](
+        { sessionID: "session" },
+        output as Parameters<NonNullable<(typeof hooks)["chat.message"]>>[1],
+      );
+      const model = output.message.model;
+      requests.push(`${model.providerID}/${model.modelID}`);
+      if (model.providerID === "a") {
+        completedTools.push("write-file");
+        transcript.push("partial output; write-file completed");
+        await hooks.event({
+          event: {
+            type: "message.updated",
+            properties: {
+              info: {
+                id: "assistant",
+                sessionID: "session",
+                parentID: id,
+                role: "assistant",
+                agent: "Omni",
+                ...model,
+                error: {
+                  name: "APIError",
+                  data: { statusCode: 503, isRetryable: true, message: "unavailable" },
+                },
+              },
+            },
+          },
+        } as Parameters<NonNullable<typeof hooks.event>>[0]);
+      } else {
+        expect(transcript).toEqual(["partial output; write-file completed"]);
+        transcript.push("continued by deterministic fallback provider");
+      }
+    };
+    await send("first");
+    expect(requests).toEqual(["a/one"]);
+    expect(client.toasts.at(-1)?.message).toContain("Nothing was retried automatically");
+    await send("explicit-continue");
+    expect(requests).toEqual(["a/one", "b/two"]);
+    expect(completedTools).toEqual(["write-file"]);
+    expect(transcript.at(-1)).toContain("continued");
+    expect(readFileSync(statePath, "utf8")).toBe(stateBefore);
+    expect(readFileSync(path.join(fixture.agentsDir, "Omni.md"), "utf8")).toBe(agentBefore);
+    // External CLI/TUI state changes invalidate the running plugin's routing.
+    writeFileSync(statePath, `${stateBefore}\n`);
+    await send("after-external-apply");
+    expect(requests.at(-1)).toBe("a/one");
+  } finally {
+    fixture.cleanup();
+  }
+});
+
 const FAKE_OPENCODE_MODELS = ["a/one", "b/two", "c/three"];
+
+it.each([false, true])(
+  "uses the installed SDK showToast shape and handles error envelopes (%s)",
+  async (error) => {
+    const fixture = setup();
+    try {
+      const base = makeFakeClient();
+      const notices: string[] = [];
+      const client = {
+        ...base,
+        tui: {
+          showToast: async (input: { body: { message: string } }) => {
+            notices.push(input.body.message);
+            return error ? { error: "unavailable" } : { data: true };
+          },
+        },
+      };
+      const hooks = (await AgentRouterPlugin(
+        fakeCtx(client as unknown as FakeClient),
+      )) as unknown as PluginReturn;
+      const use = hooks.tool.router_use;
+      if (!use) throw Error("router_use missing");
+      await call(use, { name: "cheap" });
+      expect(notices).toHaveLength(1);
+      if (error) expect(base.logs.at(-1)?.message).toContain("toast-fallback");
+    } finally {
+      fixture.cleanup();
+    }
+  },
+);
 
 function agentMd(model: string, name: string): string {
   return `---\ndescription: ${name} agent\nmode: subagent\nmodel: ${model}\n---\nYou are ${name}.\n`;

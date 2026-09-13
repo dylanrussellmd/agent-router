@@ -15,6 +15,22 @@
 
 import { z } from "zod";
 
+export const FallbackSchema = z
+  .object({
+    model: z.string().regex(/^[^/\s]+\/\S+$/, "Expected provider/model"),
+    variant: z.string().min(1).optional(),
+  })
+  .strict();
+
+export const RoutingEntrySchema = z
+  .object({
+    model: z.string().min(1),
+    variant: z.string().min(1).nullable().optional(),
+    fallbacks: z.array(FallbackSchema).max(8).optional(),
+  })
+  .strict();
+export type RoutingEntry = z.infer<typeof RoutingEntrySchema>;
+
 /* ------------------------------------------------------------------------- *
  * state.json                                                                 *
  * ------------------------------------------------------------------------- */
@@ -25,6 +41,7 @@ export const StateFileSchema = z
     active: z.string().min(1),
     previousActive: z.string().min(1).nullable(),
     lastSwitchedAt: z.string().min(1),
+    fallbackAgents: z.record(z.string(), RoutingEntrySchema).optional(),
   })
   .strict();
 
@@ -36,7 +53,7 @@ export type StateFile = z.infer<typeof StateFileSchema>;
 
 /**
  * The smallest commitment a stack entry makes: it must have a `model` string.
- * Any other key is a provider pass-through option (`reasoningEffort`,
+ * Except router-owned `fallbacks`, other keys are provider pass-through options (`reasoningEffort`,
  * `thinking`, `temperature`, …) that agent-router transcribes to the agent
  * file's frontmatter alongside `model`. Unknown keys ride along unchanged so
  * future additions survive round-trips; reserved opencode framework keys
@@ -46,6 +63,8 @@ export type StateFile = z.infer<typeof StateFileSchema>;
 export const AgentEntrySchema = z
   .object({
     model: z.string().min(1),
+    variant: z.string().min(1).nullable().optional(),
+    fallbacks: z.array(FallbackSchema).max(8).optional(),
   })
   .passthrough();
 

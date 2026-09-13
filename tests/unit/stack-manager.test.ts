@@ -98,6 +98,59 @@ describe("listStacks / readStack", () => {
 });
 
 describe("applyStack", () => {
+  it("keeps fallback metadata out of frontmatter and preserves applied metadata in capture/history", async () => {
+    const fallbacks = [{ model: "b/two", variant: "low" }, { model: "c/three" }];
+    writeFileSync(
+      stackPath(paths, "routing"),
+      JSON.stringify({ agents: { Omni: { model: "a/one", fallbacks } } }),
+    );
+    await applyStack(paths, "routing", { validateOptions: ALLOW_ALL });
+    expect(agentRaw("Omni")).not.toContain("fallbacks");
+    expect((await readState(paths.statePath))?.fallbackAgents?.Omni?.fallbacks).toEqual(fallbacks);
+    // Editing the named stack is not applying it.
+    writeFileSync(
+      stackPath(paths, "routing"),
+      JSON.stringify({ agents: { Omni: { model: "a/one", fallbacks: [] } } }),
+    );
+    await captureStack(paths, "snapshot");
+    expect((await readStack(paths, "snapshot")).agents.Omni?.fallbacks).toEqual(fallbacks);
+    const switched = await applyStack(paths, "cheap", { validateOptions: ALLOW_ALL });
+    const history = JSON.parse(
+      readFileSync(path.join(paths.historyDir, `${switched.historyId}.json`), "utf8"),
+    );
+    expect(history.agents.Omni.fallbacks).toEqual(fallbacks);
+    expect((await readState(paths.statePath))?.fallbackAgents).toEqual({});
+    await back(paths, 1, { validateOptions: ALLOW_ALL });
+    expect((await readState(paths.statePath))?.fallbackAgents).toEqual({});
+  });
+
+  it("does not capture stale routing after manual primary/variant edits", async () => {
+    writeFileSync(
+      stackPath(paths, "routing"),
+      JSON.stringify({
+        agents: { Omni: { model: "a/one", variant: "high", fallbacks: [{ model: "b/two" }] } },
+      }),
+    );
+    await applyStack(paths, "routing", { validateOptions: ALLOW_ALL });
+    writeFileSync(path.join(paths.agentsDir, "Omni.md"), agentMd("a/one", "Omni"));
+    await captureStack(paths, "changed");
+    expect((await readStack(paths, "changed")).agents.Omni?.fallbacks).toBeUndefined();
+  });
+
+  it("validates missing fallback IDs before any write", async () => {
+    writeFileSync(
+      stackPath(paths, "bad-fallback"),
+      JSON.stringify({
+        agents: { Omni: { model: "a/one", fallbacks: [{ model: "missing/model" }] } },
+      }),
+    );
+    const before = agentRaw("Omni");
+    await expect(
+      applyStack(paths, "bad-fallback", { validateOptions: ALLOW_ALL }),
+    ).rejects.toBeInstanceOf(ModelValidationError);
+    expect(agentRaw("Omni")).toBe(before);
+    expect(await readState(paths.statePath)).toBeNull();
+  });
   it("rewrites frontmatter models and updates state", async () => {
     const r = await applyStack(paths, "cheap", { validateOptions: ALLOW_ALL });
     expect(r.current).toBe("cheap");

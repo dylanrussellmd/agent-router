@@ -176,7 +176,7 @@ export async function applyStack(
   const prevState = await readState(paths.statePath);
   const prevActive = prevState?.active ?? null;
 
-  const displaced = { agents: entriesToStackAgents(await readAgentEntries(paths.agentsDir)) };
+  const displaced = { agents: await captureAgents(paths) };
   const historyId = await appendHistory(
     paths.historyDir,
     prevActive ?? "(none)",
@@ -196,6 +196,21 @@ export async function applyStack(
     active: name,
     previousActive: prevActive,
     lastSwitchedAt: new Date().toISOString(),
+    fallbackAgents: Object.fromEntries(
+      Object.entries(target.agents)
+        .filter(([, entry]) => entry.fallbacks?.length)
+        .map(([agent, entry]) => {
+          const variant = "variant" in entry ? entry.variant : displaced.agents[agent]?.variant;
+          return [
+            agent,
+            {
+              model: entry.model,
+              variant: typeof variant === "string" ? variant : undefined,
+              fallbacks: entry.fallbacks,
+            },
+          ];
+        }),
+    ),
   });
 
   await trimHistory(paths.historyDir).catch(() => {});
@@ -214,13 +229,14 @@ export async function applyStack(
  * by its own path; {@link RESERVED_AGENT_KEYS} (opencode framework config such
  * as `description`, `permission`, `tools`) are stripped so a stack entry can
  * never accidentally clobber framework fields. Everything else is treated as
- * a provider pass-through option and written to frontmatter on apply.
+ * a provider pass-through option and written to frontmatter on apply, except
+ * router-owned `fallbacks` metadata.
  */
 function entryOptions(entry: { model: string }): Record<string, unknown> {
   const rec = entry as unknown as Record<string, unknown>;
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(rec)) {
-    if (k === "model" || RESERVED_AGENT_KEYS.has(k)) continue;
+    if (k === "model" || k === "fallbacks" || RESERVED_AGENT_KEYS.has(k)) continue;
     out[k] = v;
   }
   return out;
@@ -242,10 +258,29 @@ function entriesToStackAgents(
     if (!entry) continue;
     const { model, options } = entry;
     const stackEntry: Record<string, unknown> = { model };
-    for (const [k, v] of Object.entries(options)) stackEntry[k] = v;
+    for (const [k, v] of Object.entries(options)) {
+      if (k !== "fallbacks") stackEntry[k] = v;
+    }
     out[name] = stackEntry;
   }
   return out;
+}
+
+/** Merge only applied metadata whose primary still matches live frontmatter. */
+export async function captureAgents(paths: RouterPaths) {
+  const agents = entriesToStackAgents(await readAgentEntries(paths.agentsDir));
+  const state = await readState(paths.statePath);
+  for (const [name, entry] of Object.entries(agents)) {
+    const routing = state?.fallbackAgents?.[name];
+    if (
+      routing &&
+      routing.model === entry.model &&
+      (routing.variant ?? undefined) === (entry.variant ?? undefined)
+    ) {
+      entry.fallbacks = routing.fallbacks;
+    }
+  }
+  return agents;
 }
 
 /* ------------------------------------------------------------------------- *
@@ -328,8 +363,7 @@ export async function captureStack(
   if (existsSync(dest) && !options.force) {
     throw new UserError(`Stack "${name}" already exists. Use --force to overwrite.`);
   }
-  const entries = await readAgentEntries(paths.agentsDir);
-  const agents = entriesToStackAgents(entries);
+  const agents = await captureAgents(paths);
   if (Object.keys(agents).length === 0) {
     throw new UserError(
       `No agent .md files with a frontmatter \`model:\` line found in ${paths.agentsDir}.`,

@@ -49,6 +49,7 @@ import { StackFileSchema } from "./core/schema.js";
 import {
   applyStack,
   back,
+  captureAgents,
   captureStack,
   exportStack,
   getActiveStackName,
@@ -275,11 +276,7 @@ async function cmdValidate(
     targets.push({
       name: "(current frontmatter)",
       load: async () => {
-        const models = await readAgentModels(paths.agentsDir);
-        const agents = Object.fromEntries(
-          Object.entries(models).map(([k, model]) => [k, { model }]),
-        );
-        return { agents };
+        return { agents: await captureAgents(paths) };
       },
     });
   } else if (opts.all) {

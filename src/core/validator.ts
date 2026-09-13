@@ -68,6 +68,9 @@ export function collectModelRefs(stack: StackFile): Array<MissingModel> {
   const refs: Array<MissingModel> = [];
   for (const [k, v] of Object.entries(stack.agents)) {
     refs.push({ path: `agents.${k}.model`, modelId: v.model });
+    for (const [index, candidate] of (v.fallbacks ?? []).entries()) {
+      refs.push({ path: `agents.${k}.fallbacks.${index}.model`, modelId: candidate.model });
+    }
   }
   return refs;
 }

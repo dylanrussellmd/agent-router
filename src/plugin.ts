@@ -23,15 +23,18 @@
  * `output` so the agent can parse our tool responses programmatically.
  */
 
+import { readFileSync } from "node:fs";
 import { type Plugin, tool } from "@opencode-ai/plugin";
 import { resolvePathsWithConfig } from "./core/config.js";
 import { RouterError } from "./core/errors.js";
+import { createFailover } from "./core/failover.js";
 import { readAgentModels } from "./core/frontmatter.js";
 import type { RouterPaths } from "./core/paths.js";
-import { StackFileSchema } from "./core/schema.js";
+import { RoutingEntrySchema, StackFileSchema } from "./core/schema.js";
 import {
   applyStack,
   back as backCore,
+  captureAgents,
   captureStack,
   getActiveStackName,
   listStacks,
@@ -52,6 +55,9 @@ interface PluginClientLike {
     }) => Promise<unknown>;
   };
   tui?: {
+    showToast?: (input: {
+      body: { message: string; variant: "info" | "success" | "warning"; duration?: number };
+    }) => Promise<unknown>;
     toast?: {
       show?: (input: {
         body: { message: string; variant: "info" | "success" | "warning" };
@@ -71,6 +77,12 @@ async function safeToast(
   variant: "info" | "success" | "warning" = "success",
 ): Promise<void> {
   try {
+    if (client.tui?.showToast) {
+      const result = await client.tui.showToast({ body: { message, variant, duration: 15000 } });
+      if (result && typeof result === "object" && "error" in result && result.error)
+        throw result.error;
+      return;
+    }
     if (client.tui?.toast?.show) {
       await client.tui.toast.show({ body: { message, variant } });
       return;
@@ -112,6 +124,31 @@ function errOut(e: unknown): { output: string; metadata: { error: string } } {
 export const AgentRouterPlugin: Plugin = async (ctx) => {
   const paths: RouterPaths = await resolvePathsWithConfig();
   const client = ctx.client as unknown as PluginClientLike;
+  const stateBytes = () => {
+    try {
+      return readFileSync(paths.statePath, "utf8");
+    } catch {
+      return undefined;
+    }
+  };
+  const initialState = stateBytes();
+  const captured = await captureAgents(paths).catch(() => ({}));
+  const routes = Object.fromEntries(
+    Object.entries(captured).flatMap(([agent, entry]) => {
+      const parsed = RoutingEntrySchema.safeParse({
+        model: entry.model,
+        variant: entry.variant,
+        fallbacks: entry.fallbacks,
+      });
+      return parsed.success && parsed.data.fallbacks?.length ? [[agent, parsed.data]] : [];
+    }),
+  );
+  const failover = createFailover(routes, async (message) => {
+    await client.app
+      ?.log?.({ body: { service: "agent-router", level: "warn", message } })
+      .catch(() => {});
+    await safeToast(client, message, "warning");
+  });
 
   // Init log. Best-effort — never throw from plugin init.
   await client.app
@@ -132,6 +169,12 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
     });
 
   return {
+    event: failover.event,
+    "chat.message": async (input, output) => {
+      // A CLI/TUI apply invalidates startup routing. Do not race it with an SDK model write.
+      if (stateBytes() !== initialState) failover.disable();
+      await failover.message(input, output);
+    },
     tool: {
       router_status: tool({
         description:
@@ -179,6 +222,7 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
         },
         async execute(args) {
           try {
+            failover.disable();
             const r = await applyStack(paths, args.name, {
               validate: args.validate ?? true,
             });
@@ -232,12 +276,7 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
           try {
             let stack: unknown;
             if (args.active) {
-              const models = await readAgentModels(paths.agentsDir);
-              stack = {
-                agents: Object.fromEntries(
-                  Object.entries(models).map(([k, model]) => [k, { model }]),
-                ),
-              };
+              stack = { agents: await captureAgents(paths) };
             } else if (args.name) {
               stack = await readStack(paths, args.name);
             } else {
@@ -263,6 +302,7 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
         },
         async execute(args) {
           try {
+            failover.disable();
             const r = await backCore(paths, args.n ?? 1);
             await safeToast(
               client,
