@@ -41,6 +41,15 @@ describe("buildSidebarNodes", () => {
     expect(nodes.map((n) => n.text)).toContain(" ▣ (none)");
   });
 
+  it("leaves one blank row between Agent Stacks and Current Stack", () => {
+    for (const snapshot of [snap(null), snap("premium", ["cheap", "premium"])]) {
+      const nodes = buildSidebarNodes(snapshot, { bootActive: snapshot.active });
+      const index = nodes.findIndex((node) => node.text === "Current Stack");
+      expect(nodes[index].props.marginTop).toBe(1);
+      expect(nodes[index - 1].props.marginBottom ?? 0).toBe(0);
+    }
+  });
+
   it("lists all stacks as muted unchecked when no active stack is set", () => {
     const nodes = buildSidebarNodes(snap(null, ["a", "b"]), { bootActive: null });
     const texts = nodes.map((n) => n.text);

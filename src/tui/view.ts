@@ -59,7 +59,7 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
   }
 
   // Configured stack chains, not the session-local runtime candidate.
-  nodes.push(text("Current Stack", { fg: theme.text, attributes: TEXT_ATTR_BOLD }));
+  nodes.push(text("Current Stack", { fg: theme.text, attributes: TEXT_ATTR_BOLD, marginTop: 1 }));
   if (snapshot.agents.length === 0) {
     nodes.push(text("• (none)", { fg: theme.textMuted }));
   } else {
