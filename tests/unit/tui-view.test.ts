@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { type SolidRuntime, materialize } from "../../src/tui/render.js";
 import { type AgentAssignment, type StackSnapshot, snapshotKey } from "../../src/tui/store.js";
-import { buildSidebarNodes, restartRequired } from "../../src/tui/view.js";
+import { type ViewNode, buildSidebarNodes, restartRequired } from "../../src/tui/view.js";
 
 const AGENTS: AgentAssignment[] = [];
+
+function allText(nodes: readonly ViewNode[]): string[] {
+  return nodes.flatMap((node) => [
+    ...(node.text === undefined ? [] : [node.text]),
+    ...allText(node.children ?? []),
+  ]);
+}
 
 const snap = (
   active: string | null,
@@ -59,7 +66,7 @@ describe("buildSidebarNodes", () => {
     expect(nodes.find((n) => n.text === " ⟳ restart required")?.props.fg).toBe("WARN");
   });
 
-  it("renders a Current Stack header followed by each agent → model line", () => {
+  it("groups each agent with its primary model and labels routing as configured", () => {
     const agents = [
       { agent: "build", model: "gpt-5" },
       { agent: "explorer", model: "claude-opus" },
@@ -67,12 +74,51 @@ describe("buildSidebarNodes", () => {
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s" });
     const headerIdx = nodes.findIndex((n) => n.text === "Current Stack");
     expect(headerIdx).toBeGreaterThan(0);
-    // Each agent line is a row box: bullet + "agent → model"
-    const line1 = nodes[headerIdx + 1];
-    const line2 = nodes[headerIdx + 2];
+    expect(nodes[headerIdx + 1].text).toBe("Configured routing");
+    const line1 = nodes[headerIdx + 2];
+    const line2 = nodes[headerIdx + 3];
     expect(line1.kind).toBe("box");
-    expect(line1.children?.map((c) => c.text)).toEqual(["•", "build → gpt-5"]);
-    expect(line2.children?.map((c) => c.text)).toEqual(["•", "explorer → claude-opus"]);
+    expect(line1.props.flexDirection).toBe("column");
+    expect(allText([line1])).toEqual(["•", "build", "Primary → gpt-5"]);
+    expect(allText([line2])).toEqual(["•", "explorer", "Primary → claude-opus"]);
+  });
+
+  it("renders ordered fallback models and explicit variants under their own agent", () => {
+    const agents = [
+      {
+        agent: "omni",
+        model: "a/primary",
+        variant: "medium",
+        fallbacks: [{ model: "b/backup", variant: "high" }, { model: "c/last" }],
+      },
+      { agent: "explorer", model: "a/fast", variant: null, fallbacks: [] },
+    ];
+    const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s" });
+    const groups = nodes.filter((node) => node.kind === "box");
+    expect(allText([groups[0]])).toEqual([
+      "•",
+      "omni",
+      "Primary → a/primary [medium]",
+      "Fallback 1 → b/backup [high]",
+      "Fallback 2 → c/last",
+    ]);
+    expect(allText([groups[1]])).toEqual(["•", "explorer", "Primary → a/fast"]);
+    expect(groups[0].children?.[1]?.props.paddingLeft).toBe(2);
+    expect(allText(nodes).some((label) => /undefined|null|running/i.test(label))).toBe(false);
+  });
+
+  it("renders every fallback up to the schema limit without truncating model IDs", () => {
+    const fallbacks = Array.from({ length: 8 }, (_, i) => ({
+      model: `provider/organization/long-model-name-${i}`,
+    }));
+    const texts = allText(
+      buildSidebarNodes(snap("s", ["s"], [{ agent: "omni", model: "a/p", fallbacks }]), {
+        bootActive: "s",
+      }),
+    );
+    expect(texts.filter((label) => label.startsWith("Fallback "))).toEqual(
+      fallbacks.map((fallback, i) => `Fallback ${i + 1} → ${fallback.model}`),
+    );
   });
 
   it("shows (none) under Current Stack when the active stack has no agents", () => {
@@ -82,18 +128,19 @@ describe("buildSidebarNodes", () => {
     expect(texts[headerIdx + 1]).toBe("• (none)");
   });
 
-  it("colors the bullet green (via style.fg) and the agent → model text muted", () => {
+  it("highlights agent names while keeping primary and fallback details muted", () => {
     const theme = { text: "TEXT", textMuted: "MUTED", success: "OK" };
-    const agents = [{ agent: "build", model: "gpt-5" }];
+    const agents = [{ agent: "build", model: "gpt-5", fallbacks: [{ model: "a/backup" }] }];
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s", theme });
     const headerIdx = nodes.findIndex((n) => n.text === "Current Stack");
-    const line = nodes[headerIdx + 1];
+    const line = nodes[headerIdx + 2];
     expect(line.kind).toBe("box");
-    // bullet: flexShrink:0, green via style.fg (mirrors opencode LSP pattern)
-    expect(line.children?.[0]?.props.flexShrink).toBe(0);
-    expect(line.children?.[0]?.props.style).toEqual({ fg: "OK" });
-    // label: muted
-    expect(line.children?.[1]?.props.fg).toBe("MUTED");
+    const heading = line.children?.[0];
+    expect(heading?.children?.[0]?.props.flexShrink).toBe(0);
+    expect(heading?.children?.[0]?.props.style).toEqual({ fg: "OK" });
+    expect(heading?.children?.[1]?.props.fg).toBe("TEXT");
+    expect(heading?.children?.[1]?.props.attributes).toBe(1);
+    expect(line.children?.[1]?.children?.map((node) => node.props.fg)).toEqual(["MUTED", "MUTED"]);
     expect(nodes.find((n) => n.text === "Current Stack")?.props.fg).toBe("TEXT");
   });
 });
@@ -155,5 +202,23 @@ describe("materialize", () => {
     ) as FakeNode;
     const first = root.children[0] as FakeNode;
     expect("fg" in first.props).toBe(false);
+  });
+
+  it("materializes nested primary and fallback rows", () => {
+    const solid = fakeSolid();
+    const root = materialize(
+      buildSidebarNodes(
+        snap("s", ["s"], [{ agent: "omni", model: "a/p", fallbacks: [{ model: "b/f" }] }]),
+        { bootActive: "s" },
+      ),
+      solid,
+    ) as FakeNode;
+    const group = root.children[4] as FakeNode;
+    const routing = group.children[1] as FakeNode;
+    expect(routing.props.paddingLeft).toBe(2);
+    expect(routing.children.map((child) => (child as FakeNode).children)).toEqual([
+      ["Primary → a/p"],
+      ["Fallback 1 → b/f"],
+    ]);
   });
 });

@@ -71,8 +71,8 @@ describe("readStackSnapshot", () => {
     );
     const snap = await readStackSnapshot(paths);
     expect(snap.agents).toEqual([
-      { agent: "build", model: "gpt-5" },
-      { agent: "explorer", model: "claude-opus" },
+      { agent: "build", model: "gpt-5", variant: null, fallbacks: [] },
+      { agent: "explorer", model: "claude-opus", variant: null, fallbacks: [] },
     ]);
     // key incorporates agents so edits are detected by the poller
     expect(snap.key).toBe(snapshotKey("work", ["work"], snap.agents));
@@ -94,6 +94,56 @@ describe("readStackSnapshot", () => {
     const snap = await readStackSnapshot(paths);
     expect(snap.active).toBe("broken");
     expect(snap.agents).toEqual([]);
+  });
+
+  it("reads configured chains and variants without substituting applied state metadata", async () => {
+    const paths = resolvePaths({ routerHome: path.join(root, "router"), env: {} });
+    mkdirSync(paths.stacksDir, { recursive: true });
+    const fallbacks = [{ model: "b/backup", variant: "high" }, { model: "c/last" }];
+    writeFileSync(
+      path.join(paths.stacksDir, "work.json"),
+      JSON.stringify({ agents: { omni: { model: "a/primary", variant: "medium", fallbacks } } }),
+    );
+    writeFileSync(
+      paths.statePath,
+      JSON.stringify({
+        version: 1,
+        active: "work",
+        previousActive: null,
+        lastSwitchedAt: new Date().toISOString(),
+        fallbackAgents: { omni: { model: "a/primary", fallbacks: [{ model: "d/old" }] } },
+      }),
+    );
+    const snap = await readStackSnapshot(paths);
+    expect(snap.active).toBe("work");
+    expect(snap.agents).toEqual([
+      { agent: "omni", model: "a/primary", variant: "medium", fallbacks },
+    ]);
+  });
+});
+
+describe("snapshotKey", () => {
+  const primary = { agent: "omni", model: "a/primary" };
+  const fallbacks = [{ model: "b/backup", variant: "high" }, { model: "c/last" }];
+  const key = (entry: Parameters<typeof snapshotKey>[2]) => snapshotKey("work", ["work"], entry);
+
+  it("detects fallback additions, removals, reordering, model edits and variant edits", () => {
+    const original = key([{ ...primary, fallbacks }]);
+    for (const changed of [
+      [],
+      fallbacks.slice(0, 1),
+      [...fallbacks, { model: "d/extra" }],
+      [...fallbacks].reverse(),
+      [{ model: "b/changed", variant: "high" }, fallbacks[1]],
+      [{ model: "b/backup", variant: "low" }, fallbacks[1]],
+    ]) {
+      expect(key([{ ...primary, fallbacks: changed }])).not.toBe(original);
+    }
+    expect(key([{ ...primary, variant: "high", fallbacks }])).not.toBe(original);
+  });
+
+  it("normalizes absent chains and cleared variants", () => {
+    expect(key([primary])).toBe(key([{ ...primary, variant: null, fallbacks: [] }]));
   });
 });
 
@@ -163,6 +213,34 @@ describe("createSidebarPoller", () => {
     fail = false;
     await sched.flush();
     expect(onChange).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it("refreshes when only fallback configuration changes in the same stack", async () => {
+    const sched = manualScheduler();
+    const onChange = vi.fn();
+    const assignment = { agent: "omni", model: "a/primary" };
+    const snapshot = (fallbacks: { model: string; variant?: string }[]): StackSnapshot => {
+      const agents = [{ ...assignment, fallbacks }];
+      return { active: "a", stacks: ["a"], agents, key: snapshotKey("a", ["a"], agents) };
+    };
+    let current = snapshot([{ model: "b/backup" }]);
+    const stop = createSidebarPoller({
+      read: async () => current,
+      intervalMs: 1000,
+      initial: current,
+      onChange,
+      schedule: sched.schedule,
+      cancel: sched.cancel,
+    });
+    await sched.flush();
+    expect(onChange).not.toHaveBeenCalled();
+    current = snapshot([{ model: "b/backup", variant: "high" }]);
+    await sched.flush();
+    expect(onChange).toHaveBeenCalledTimes(1);
+    current = snapshot([]);
+    await sched.flush();
+    expect(onChange).toHaveBeenCalledTimes(2);
     stop();
   });
 
