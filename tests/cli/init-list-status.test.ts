@@ -28,12 +28,12 @@ describe("agent-router init", () => {
     const opencodeJson = JSON.parse(
       readFileSync(path.join(fx.opencodeConfigDir, "opencode.json"), "utf8"),
     );
-    expect(opencodeJson.plugin).toContain("@dylanrussell/agent-router@latest");
-    expect(opencodeJson.plugin).not.toContain("@dylanrussell/omo-router@latest");
+    expect(opencodeJson.plugins).toContain("@dylanrussell/agent-router@latest");
+    expect(opencodeJson.plugins).not.toContain("@dylanrussell/omo-router@latest");
     expect(opencodeJson.default_agent).toBe("Omni");
 
-    const tuiJson = JSON.parse(readFileSync(path.join(fx.opencodeConfigDir, "tui.json"), "utf8"));
-    expect(tuiJson.plugin).toContain("@dylanrussell/agent-router@latest");
+    const tuiJson = JSON.parse(readFileSync(path.join(fx.opencodeConfigDir, "cli.json"), "utf8"));
+    expect(tuiJson.plugins).toContain("@dylanrussell/agent-router@latest");
 
     expect(existsSync(path.join(fx.routerHome, "history"))).toBe(true);
   });
@@ -46,7 +46,7 @@ describe("agent-router init", () => {
     const opencodeJson = JSON.parse(
       readFileSync(path.join(fx.opencodeConfigDir, "opencode.json"), "utf8"),
     );
-    expect(opencodeJson.plugin.filter((p: string) => p.includes("agent-router"))).toHaveLength(1);
+    expect(opencodeJson.plugins.filter((p: string) => p.includes("agent-router"))).toHaveLength(1);
   });
 
   it("--no-edit-opencode-json leaves configs alone", () => {
@@ -56,7 +56,7 @@ describe("agent-router init", () => {
       readFileSync(path.join(fx.opencodeConfigDir, "opencode.json"), "utf8"),
     );
     expect(opencodeJson.plugin).toEqual(["@dylanrussell/omo-router@latest"]);
-    expect(existsSync(path.join(fx.opencodeConfigDir, "tui.json"))).toBe(false);
+    expect(existsSync(path.join(fx.opencodeConfigDir, "cli.json"))).toBe(false);
   });
 });
 

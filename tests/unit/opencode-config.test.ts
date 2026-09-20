@@ -23,17 +23,24 @@ afterEach(() => {
 });
 
 describe("ensurePluginEntry", () => {
+  it("preserves V2 package options and recognizes version-pinned object entries", () => {
+    const input = {
+      plugins: [{ package: "@dylanrussell/agent-router@2.0.0", options: { custom: true } }],
+    };
+    expect(ensurePluginEntry(input).config).toEqual(input);
+    expect(ensurePluginEntry(input).result.added).toBe(false);
+  });
   it("adds the entry when absent", () => {
     const { config, result } = ensurePluginEntry({ plugin: ["other@latest"] });
     expect(result.added).toBe(true);
-    expect(config.plugin).toEqual(["other@latest", PLUGIN_REGISTRY_ENTRY]);
+    expect(config.plugins).toEqual(["other@latest", PLUGIN_REGISTRY_ENTRY]);
   });
 
   it("is idempotent", () => {
     const first = ensurePluginEntry({ plugin: [] });
     const second = ensurePluginEntry(first.config);
     expect(second.result.added).toBe(false);
-    expect(second.config.plugin).toEqual(first.config.plugin);
+    expect(second.config.plugins).toEqual(first.config.plugins);
   });
 
   it("treats version-pinned entries as present", () => {
@@ -45,7 +52,7 @@ describe("ensurePluginEntry", () => {
 
   it("creates the plugin array when missing", () => {
     const { config } = ensurePluginEntry({});
-    expect(config.plugin).toEqual([PLUGIN_REGISTRY_ENTRY]);
+    expect(config.plugins).toEqual([PLUGIN_REGISTRY_ENTRY]);
   });
 });
 
@@ -97,7 +104,7 @@ describe("read/writeOpencodeJson", () => {
     const after = JSON.parse(readFileSync(p, "utf8"));
     expect(after.default_agent).toBe("Omni");
     expect(after.provider.openrouter.models.x).toEqual({});
-    expect(after.plugin).toContain(PLUGIN_REGISTRY_ENTRY);
+    expect(after.plugins).toContain(PLUGIN_REGISTRY_ENTRY);
   });
 });
 
@@ -107,7 +114,7 @@ describe("ensureTuiJsonPluginEntry", () => {
     const result = await ensureTuiJsonPluginEntry(p);
     expect(result.added).toBe(true);
     const parsed = JSON.parse(readFileSync(p, "utf8"));
-    expect(parsed.plugin).toEqual([PLUGIN_REGISTRY_ENTRY]);
+    expect(parsed.plugins).toEqual([PLUGIN_REGISTRY_ENTRY]);
     expect(parsed.$schema).toBeDefined();
   });
 
@@ -117,7 +124,7 @@ describe("ensureTuiJsonPluginEntry", () => {
     const second = await ensureTuiJsonPluginEntry(p);
     expect(second.added).toBe(false);
     const parsed = JSON.parse(readFileSync(p, "utf8"));
-    expect(parsed.plugin).toHaveLength(1);
+    expect(parsed.plugins).toHaveLength(1);
   });
 
   it("swaps the legacy omo-router entry for the new one", async () => {
@@ -125,6 +132,6 @@ describe("ensureTuiJsonPluginEntry", () => {
     writeFileSync(p, JSON.stringify({ plugin: ["@dylanrussell/omo-router@latest"] }));
     await ensureTuiJsonPluginEntry(p);
     const parsed = JSON.parse(readFileSync(p, "utf8"));
-    expect(parsed.plugin).toEqual([PLUGIN_REGISTRY_ENTRY]);
+    expect(parsed.plugins).toEqual([PLUGIN_REGISTRY_ENTRY]);
   });
 });

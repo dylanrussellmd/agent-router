@@ -7,7 +7,7 @@ describe("resolvePaths", () => {
     const p = resolvePaths({ env: { XDG_CONFIG_HOME: "/x" } });
     expect(p.opencodeConfigDir).toBe("/x/opencode");
     expect(p.opencodeJsonPath).toBe("/x/opencode/opencode.json");
-    expect(p.tuiJsonPath).toBe("/x/opencode/tui.json");
+    expect(p.tuiJsonPath).toBe("/x/opencode/cli.json");
     expect(p.agentsDir).toBe("/x/opencode/agents");
     expect(p.routerHome).toBe("/x/opencode/agent-router");
     expect(p.statePath).toBe("/x/opencode/agent-router/state.json");

@@ -24,7 +24,18 @@
  */
 
 import { readFileSync } from "node:fs";
-import { type Plugin, tool } from "@opencode-ai/plugin";
+import { z } from "zod";
+import { setupV2 } from "./v2.js";
+const tool = Object.assign(
+  <T extends z.ZodRawShape>(definition: {
+    description: string;
+    args: T;
+    execute: (
+      args: z.infer<z.ZodObject<T>>,
+    ) => Promise<{ output: string; metadata: Record<string, unknown> }>;
+  }) => definition,
+  { schema: z },
+);
 import { resolvePathsWithConfig } from "./core/config.js";
 import { RouterError } from "./core/errors.js";
 import { createFailover } from "./core/failover.js";
@@ -40,7 +51,7 @@ import {
   listStacks,
   readStack,
 } from "./core/stack-manager.js";
-import { validateStack } from "./core/validator.js";
+import { type ValidateOptions, validateStack } from "./core/validator.js";
 import { VERSION } from "./version.js";
 
 interface PluginClientLike {
@@ -121,7 +132,10 @@ function errOut(e: unknown): { output: string; metadata: { error: string } } {
  * plugin definition                                                          *
  * ------------------------------------------------------------------------- */
 
-export const AgentRouterPlugin: Plugin = async (ctx) => {
+export const AgentRouterPlugin = async (
+  ctx: { client: PluginClientLike },
+  validateOptions?: ValidateOptions,
+) => {
   const paths: RouterPaths = await resolvePathsWithConfig();
   const client = ctx.client as unknown as PluginClientLike;
   const stateBytes = () => {
@@ -170,7 +184,10 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
 
   return {
     event: failover.event,
-    "chat.message": async (input, output) => {
+    "chat.message": async (
+      input: Parameters<ReturnType<typeof createFailover>["message"]>[0],
+      output: Parameters<ReturnType<typeof createFailover>["message"]>[1],
+    ) => {
       // A CLI/TUI apply invalidates startup routing. Do not race it with an SDK model write.
       if (stateBytes() !== initialState) failover.disable();
       await failover.message(input, output);
@@ -225,6 +242,7 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
             failover.disable();
             const r = await applyStack(paths, args.name, {
               validate: args.validate ?? true,
+              ...(validateOptions ? { validateOptions } : {}),
             });
             await safeToast(
               client,
@@ -282,7 +300,7 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
             } else {
               return errOut(new Error("Pass `name` or `active: true`."));
             }
-            const r = await validateStack(StackFileSchema.parse(stack));
+            const r = await validateStack(StackFileSchema.parse(stack), validateOptions);
             return ok({
               ok: r.ok,
               checked: r.checked,
@@ -322,4 +340,4 @@ export const AgentRouterPlugin: Plugin = async (ctx) => {
   };
 };
 
-export default AgentRouterPlugin;
+export default { id: "agent-router", setup: setupV2 };

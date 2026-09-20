@@ -81,6 +81,10 @@ export function createFailover(
   const notify = (message: string) => notice(`agent-router: ${message}`).catch(() => {});
 
   return {
+    active(sessionID: string) {
+      const state = sessions.get(sessionID);
+      return enabled && Boolean(state?.turn) && !state?.disabled;
+    },
     disable() {
       enabled = false;
       sessions.clear();

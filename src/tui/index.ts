@@ -10,6 +10,7 @@
  * API-typing stance.
  */
 
+import type { Context } from "@opencode/plugin/tui/context";
 import { resolvePathsWithConfig } from "../core/config.js";
 import {
   type DialogDeps,
@@ -187,7 +188,128 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
 
 const agentRouterTui = {
   id: "agent-router:tui",
-  tui,
+  async setup(ctx: Context) {
+    const solid = await importHostSolid();
+    if (!solid) return;
+    const cleanups: Array<() => void | Promise<void>> = [];
+    const [revision, updateRevision] = ctx.storage.memory("sidebar-revision", {
+      initial: { value: 0 },
+    });
+    const api: RouterTuiApi = {
+      slots: {
+        register: ({ slots }) => {
+          for (const render of Object.values(slots)) {
+            cleanups.push(
+              ctx.ui.slot({
+                append: "sidebar.content",
+                render: () => {
+                  const node = solid.createElement("box");
+                  solid.setProp(node, "flexDirection", "column");
+                  solid.insert(node, () => {
+                    void revision.value;
+                    return render();
+                  });
+                  return node as never;
+                },
+              }),
+            );
+          }
+        },
+      },
+      renderer: {
+        requestRender: () => {
+          updateRevision((draft) => {
+            draft.value++;
+          });
+          ctx.renderer.requestRender();
+        },
+      },
+      ui: {
+        toast: (input) => ctx.ui.toast.show(input),
+        dialog: {
+          replace: (render) => {
+            render();
+          },
+          clear: () => ctx.ui.dialog.clear(),
+        },
+        DialogSelect: (props) => {
+          void ctx.ui.dialog
+            .select({
+              title: props.title,
+              options: props.options.map((option) => ({
+                title: option.title,
+                value: option.value,
+                ...(option.description ? { description: option.description } : {}),
+                ...(option.category ? { category: option.category } : {}),
+                ...(option.disabled !== undefined ? { disabled: option.disabled } : {}),
+              })),
+              current: props.current,
+            })
+            .then((value) => {
+              const option = props.options.find((option) => option.value === value);
+              if (option) {
+                option.onSelect?.();
+                props.onSelect?.(option);
+              }
+            });
+          return null;
+        },
+        DialogConfirm: (props) => {
+          void ctx.ui.dialog.confirm({ title: props.title, message: props.message }).then((yes) => {
+            if (yes) props.onConfirm?.();
+            else props.onCancel?.();
+          });
+          return null;
+        },
+      },
+      command: {
+        register: (build) =>
+          cleanups.push(
+            ctx.ui.slot({
+              append: "app",
+              render: () => {
+                // 2.0.8's Keymap.Provider is available only under a mounted UI owner.
+                ctx.keymap.layer(() => ({
+                  mode: "global",
+                  commands: build().map((command) => ({
+                    id: command.value,
+                    title: command.title,
+                    group: command.category ?? "agent-router",
+                    palette: true,
+                    ...(command.slash
+                      ? {
+                          slash: {
+                            name: command.slash.name,
+                            aliases: [...(command.slash.aliases ?? [])],
+                          },
+                        }
+                      : {}),
+                    run: () => command.onSelect?.(),
+                  })),
+                }));
+                return null;
+              },
+            }),
+          ),
+      },
+      lifecycle: { onDispose: (cleanup) => cleanups.push(cleanup) },
+      state: {
+        get provider() {
+          const models = ctx.data.location.model.list(ctx.location) ?? [];
+          return [...new Set(models.map((model) => model.providerID))].map((id) => ({
+            id,
+            models: Object.fromEntries(
+              models.filter((model) => model.providerID === id).map((model) => [model.id, model]),
+            ),
+          }));
+        },
+      },
+    };
+    await tui(api);
+    return async () => {
+      for (const cleanup of cleanups.reverse()) await cleanup();
+    };
+  },
 };
 
 export default agentRouterTui;

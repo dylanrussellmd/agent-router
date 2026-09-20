@@ -167,9 +167,16 @@ export async function applyStack(
     // content reference when it would change nothing, so a no-op entry
     // (same model, no option diffs) yields `next === null` and skips writing.
     const wantOptions = entryOptions(entry);
+    let wantModel = entry.model;
+    if (model.includes("#") || wantModel.includes("#")) {
+      const [base, inline] = wantModel.split("#");
+      const variant = "variant" in entry ? entry.variant : (inline ?? model.split("#")[1]);
+      wantModel = `${base}${variant ? `#${variant}` : ""}`;
+      wantOptions.variant = null;
+    }
     const afterOptions = setFrontmatterOptions(content, wantOptions);
     const nextContent =
-      entry.model === model ? afterOptions : setFrontmatterModel(afterOptions, entry.model);
+      wantModel === model ? afterOptions : setFrontmatterModel(afterOptions, wantModel);
     pending.push({ agent, filePath, next: nextContent === content ? null : nextContent });
   }
 
@@ -260,6 +267,10 @@ function entriesToStackAgents(
     const stackEntry: Record<string, unknown> = { model };
     for (const [k, v] of Object.entries(options)) {
       if (k !== "fallbacks") stackEntry[k] = v;
+    }
+    if (model.includes("#")) {
+      stackEntry.model = model.slice(0, model.indexOf("#"));
+      stackEntry.variant = model.slice(model.indexOf("#") + 1);
     }
     out[name] = stackEntry;
   }

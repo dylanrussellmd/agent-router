@@ -70,7 +70,7 @@ export function setupCliFixture(): CliFixture {
   writeFileSync(
     stubScript,
     `#!/usr/bin/env bash
-if [ "$1" = "models" ]; then
+if [ "$1" = "api" ]; then
   cat <<'EOF'
 ${FAKE_OPENCODE_MODELS.join("\n")}
 EOF

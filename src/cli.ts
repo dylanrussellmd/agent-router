@@ -127,8 +127,8 @@ async function cmdInit(paths: RouterPaths, opts: InitOptions): Promise<void> {
 
   if (opts.noEditOpencodeJson) {
     log("agent-router: --no-edit-opencode-json passed; not editing opencode.json or tui.json");
-    log(`  add this to opencode.json plugin[]: "${PLUGIN_REGISTRY_ENTRY}"`);
-    log(`  add this to tui.json plugin[] (sidebar): "${PLUGIN_REGISTRY_ENTRY}"`);
+    log(`  add this to opencode.json plugins[]: "${PLUGIN_REGISTRY_ENTRY}"`);
+    log(`  add this to cli.json plugins[] (sidebar): "${PLUGIN_REGISTRY_ENTRY}"`);
     return;
   }
 
@@ -147,7 +147,7 @@ async function editTuiJson(paths: RouterPaths): Promise<void> {
   }
   const result = await ensureTuiJsonPluginEntry(paths.tuiJsonPath);
   if (result.added) {
-    log(`agent-router: added "${PLUGIN_REGISTRY_ENTRY}" to tui.json plugin[] (sidebar support)`);
+    log(`agent-router: added "${PLUGIN_REGISTRY_ENTRY}" to cli.json plugins[] (sidebar support)`);
     return;
   }
   log("agent-router: tui.json already up to date");
@@ -181,7 +181,7 @@ async function editOpencodeJson(paths: RouterPaths): Promise<void> {
     );
   }
   if (ensured.result.added) {
-    log(`agent-router: added "${PLUGIN_REGISTRY_ENTRY}" to opencode.json plugin[]`);
+    log(`agent-router: added "${PLUGIN_REGISTRY_ENTRY}" to opencode.json plugins[]`);
   }
 }
 

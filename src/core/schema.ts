@@ -108,6 +108,16 @@ export type ConfigFile = z.infer<typeof ConfigFileSchema>;
 export const OpencodeJsonSchema = z
   .object({
     plugin: z.array(z.string()).optional(),
+    plugins: z
+      .array(
+        z.union([
+          z.string(),
+          z
+            .object({ package: z.string(), options: z.record(z.string(), z.unknown()).optional() })
+            .passthrough(),
+        ]),
+      )
+      .optional(),
   })
   .passthrough();
 

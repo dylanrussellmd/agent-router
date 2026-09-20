@@ -6,7 +6,7 @@ describe("published plugin dependencies", () => {
     const manifest = JSON.parse(
       readFileSync(new URL("../../package.json", import.meta.url), "utf8"),
     );
-    expect(manifest.peerDependencies["@opencode-ai/plugin"]).toBe("^1.14.0");
-    expect(manifest.peerDependenciesMeta?.["@opencode-ai/plugin"]?.optional).not.toBe(true);
+    expect(manifest.peerDependencies["@opencode/plugin"]).toBe("2.0.8");
+    expect(manifest.exports["./tui"].import).toBe("./dist/tui.js");
   });
 });

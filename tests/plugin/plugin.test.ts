@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import AgentRouterPlugin from "../../src/plugin.js";
+import { AgentRouterPlugin } from "../../src/plugin.js";
 
 it("deterministic provider harness continues only on explicit next turn without replay or persistent writes", async () => {
   const fixture = setup();
@@ -159,7 +159,7 @@ function setup(): {
   const stubScript = path.join(binDir, "opencode");
   writeFileSync(
     stubScript,
-    `#!/usr/bin/env bash\nif [ "$1" = "models" ]; then\n  printf '%s\\n' ${FAKE_OPENCODE_MODELS.map((m) => `"${m}"`).join(" ")}\n  exit 0\nfi\nexit 0\n`,
+    `#!/usr/bin/env bash\nif [ "$1" = "api" ]; then\n  printf '%s\\n' ${FAKE_OPENCODE_MODELS.map((m) => `"${m}"`).join(" ")}\n  exit 0\nfi\nexit 0\n`,
     { mode: 0o755 },
   );
   chmodSync(stubScript, 0o755);

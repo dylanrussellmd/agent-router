@@ -43,7 +43,7 @@ export interface ValidateResult {
 }
 
 const DEFAULT_RUNNER = async (): Promise<string> => {
-  const { stdout } = await execFileAsync("opencode", ["models"], {
+  const { stdout } = await execFileAsync("opencode", ["api", "model.list"], {
     encoding: "utf8",
     timeout: 30_000,
     maxBuffer: 4 * 1024 * 1024,
@@ -54,6 +54,22 @@ const DEFAULT_RUNNER = async (): Promise<string> => {
 /** Parse `opencode models` stdout into a Set of model IDs. */
 export function parseModelList(stdout: string): Set<string> {
   const out = new Set<string>();
+  if (/^[\[{]/.test(stdout.trimStart())) {
+    const parsed = JSON.parse(stdout);
+    const models = (Array.isArray(parsed) ? parsed : parsed.data) as Array<{
+      providerID: string;
+      id: string;
+      enabled?: boolean;
+      variants?: Array<{ id: string }>;
+    }>;
+    for (const model of models) {
+      if (model.enabled === false) continue;
+      const id = `${model.providerID}/${model.id}`;
+      out.add(id);
+      for (const variant of model.variants ?? []) out.add(`${id}#${variant.id}`);
+    }
+    return out;
+  }
   for (const raw of stdout.split(/\r?\n/)) {
     const line = raw.trim();
     if (!line) continue;
@@ -90,6 +106,23 @@ export async function validateStack(
   const available = parseModelList(stdout);
   const refs = collectModelRefs(stack);
   const missing = refs.filter((r) => !available.has(r.modelId));
+  // Legacy text fixtures cannot prove variant availability. V2 JSON catalogs can.
+  if (/^[\[{]/.test(stdout.trimStart())) {
+    for (const [agent, entry] of Object.entries(stack.agents)) {
+      for (const [index, candidate] of [entry, ...(entry.fallbacks ?? [])].entries()) {
+        if (!candidate.variant) continue;
+        const modelId = `${candidate.model}#${candidate.variant}`;
+        if (!available.has(modelId))
+          missing.push({
+            path:
+              index === 0
+                ? `agents.${agent}.variant`
+                : `agents.${agent}.fallbacks.${index - 1}.variant`,
+            modelId,
+          });
+      }
+    }
+  }
   return { ok: missing.length === 0, checked: refs.length, missing, available };
 }
 

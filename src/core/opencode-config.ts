@@ -76,17 +76,18 @@ export function ensurePluginEntry(
   config: OpencodeJson,
   entry: string = PLUGIN_REGISTRY_ENTRY,
 ): { config: OpencodeJson; result: EnsurePluginEntryResult } {
-  const existing = config.plugin ?? [];
+  const existing = config.plugins ?? config.plugin ?? [];
   const already = existing.some(
-    (p) => p === entry || stripVersionTag(p) === stripVersionTag(entry),
+    (p) =>
+      pluginPackage(p) === entry || stripVersionTag(pluginPackage(p)) === stripVersionTag(entry),
   );
   if (already) {
-    return { config, result: { added: false, plugin: existing } };
+    return { config, result: { added: false, plugin: existing.map(pluginPackage) } };
   }
   const next = [...existing, entry];
   return {
-    config: { ...config, plugin: next },
-    result: { added: true, plugin: next },
+    config: { ...config, plugins: next },
+    result: { added: true, plugin: next.map(pluginPackage) },
   };
 }
 
@@ -104,19 +105,24 @@ export function removePluginEntry(
   config: OpencodeJson,
   npmName: string = LEGACY_PLUGIN_NPM_NAME,
 ): { config: OpencodeJson; result: RemovePluginEntryResult } {
-  const existing = config.plugin ?? [];
-  const removed = existing.filter((p) => stripVersionTag(p) === npmName);
+  const key = config.plugins ? "plugins" : "plugin";
+  const existing = config[key] ?? [];
+  const removed = existing.filter((p) => stripVersionTag(pluginPackage(p)) === npmName);
   if (removed.length === 0) {
-    return { config, result: { removed: [], plugin: existing } };
+    return { config, result: { removed: [], plugin: existing.map(pluginPackage) } };
   }
-  const next = existing.filter((p) => stripVersionTag(p) !== npmName);
+  const next = existing.filter((p) => stripVersionTag(pluginPackage(p)) !== npmName);
   return {
-    config: { ...config, plugin: next },
-    result: { removed, plugin: next },
+    config: { ...config, [key]: next },
+    result: { removed: removed.map(pluginPackage), plugin: next.map(pluginPackage) },
   };
 }
 
 /** Strip `@version` from a plugin entry. `foo@1.2.3` → `foo`; scoped names handled. */
+function pluginPackage(entry: string | { package: string }): string {
+  return typeof entry === "string" ? entry : entry.package;
+}
+
 function stripVersionTag(entry: string): string {
   // For scoped packages `@org/name@ver`, the `@` we want is the LAST one.
   // For unscoped `name@ver`, also the last @.

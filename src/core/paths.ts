@@ -104,7 +104,7 @@ export function resolvePaths(options: ResolvePathsOptions = {}): RouterPaths {
   return {
     opencodeConfigDir,
     opencodeJsonPath: path.join(opencodeConfigDir, "opencode.json"),
-    tuiJsonPath: path.join(opencodeConfigDir, "tui.json"),
+    tuiJsonPath: path.join(opencodeConfigDir, "cli.json"),
     agentsDir,
     opencodeBackupsDir: path.join(opencodeConfigDir, ".backups"),
     routerHome,
