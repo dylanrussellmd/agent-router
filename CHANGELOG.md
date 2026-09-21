@@ -1,3 +1,9 @@
+# 2.0.2
+
+- Simplify stack chains to one model per line in precedence order, without Primary/Fallback labels.
+- Highlight the live session's selected agent/model with native theme color, bold text and a marker; show out-of-chain selections separately.
+- React to session model/agent changes, normalize default variants, and wrap full provider/model identities in narrow sidebars.
+
 # 2.0.1
 
 - Normalize V2's `default` variant so pending next-user-turn fallback is not disabled by an equivalent model reference.
@@ -21,6 +27,6 @@
 
 - Applying/backing out stacks still requires restarting OpenCode to reload agent files.
 - Terminal stack operations access local files; remote-server filesystem management is not supported.
-- Fallback notices are server logs. The sidebar shows configured routing, not session-local fallback state.
+- Fallback notices are server logs. The sidebar shows configured routing with the current session selection highlighted; it does not expose pending fallback state.
 - OpenCode 2.0.8 does not identify request kind on retry hooks. The plugin conservatively tracks the last model-request kind and only handles primary requests. Concurrent auxiliary requests can suppress fallback handling.
 - Session defaults must resolve to explicit agent/model selections before routing. Fallback routing is bounded to 1,024 tracked sessions per plugin instance.

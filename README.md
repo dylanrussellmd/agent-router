@@ -175,7 +175,7 @@ Duplicate failures advance only once per admitted user turn. Routing budgets are
 
 **Verified boundary:** compiled against the published **2.0.8** API types. Deterministic adapter tests cover next-turn selection, retry veto, auxiliary-request exclusion, variants, and no replay or persistent agent writes. These are not real-provider end-to-end tests. An LLM may choose to repeat a tool when explicitly asked to continue.
 
-OpenCode 2.0.8 exposes no atomic compare-and-switch in the prompt hook and no request kind in the retry hook. Concurrent manual selections/admissions or auxiliary requests remain host API limitations. The sidebar displays configured routing, not the session-local runtime candidate. Terminal stack operations require local filesystem access; remote server filesystem management is not supported.
+OpenCode 2.0.8 exposes no atomic compare-and-switch in the prompt hook and no request kind in the retry hook. Concurrent manual selections/admissions or auxiliary requests remain host API limitations. The sidebar displays configured routing and highlights the current session selection, not pending fallback state. Terminal stack operations require local filesystem access; remote server filesystem management is not supported.
 
 ### Install This Checkout
 
@@ -210,8 +210,8 @@ The plugin exposes six tools the agent (or you, by asking it) can call:
 
 The V2 terminal half loads from the package's `./tui` export (`cli.json`, wired up by `init`):
 
-- **Sidebar panel** — lists available stacks with the active one checked. Under **Current Stack → Configured routing**, each agent has an indented **Primary** model and ordered **Fallback 1**, **Fallback 2**, … rows. Explicit variants appear in brackets; agents without fallbacks show only their primary. Model IDs are kept in full. A `⟳ restart required` badge appears when the active stack differs from the one at TUI startup. Updates live (≤1.5s), including fallback-only and variant-only edits.
-- **Configuration, not live failover** — sidebar chains come from the active stack file, not session-local routing or the applied `state.json.fallbackAgents` snapshot. Editing a stack changes this preview but does not apply it: use the stack and restart opencode to activate changes. A fallback row is a configured candidate, not a claim that failover is enabled or that the model is currently running.
+- **Sidebar panel** — lists available stacks with the active one checked. Under **Current Stack**, each agent has one indented model per line, in precedence order, without Primary/Fallback labels. Explicit variants appear in brackets; full model IDs wrap rather than truncate. A `⟳ restart required` badge appears when the active stack differs from the one at TUI startup. File changes update live (≤1.5s).
+- **Current selection** — the live session's agent/model is highlighted in color and bold with `●`; out-of-chain selections get a separate Current row. Other agents are not presented as live selections. Configured chains still come from the active stack file, not the applied `state.json.fallbackAgents` snapshot. Editing a stack changes the preview but does not apply it: use the stack and restart opencode to activate changes. The marker reflects session selection, not proof that a request is running or that failover is enabled.
 - **Commands** — type `/` or open the command palette:
 
 | command | what it does |

@@ -23,6 +23,8 @@ export interface SidebarContext {
   /** Active stack when the TUI booted — differing means a restart is due. */
   readonly bootActive: string | null;
   readonly theme?: SidebarTheme | undefined;
+  /** Only the agent/model from this sidebar's live session may be marked current. */
+  readonly current?: (ModelAssignment & { readonly agent: string }) | undefined;
 }
 
 /** Mirrors @opentui/core's TextAttributes.BOLD bitflag — opentui is host-provided and never imported here (see render.ts). */
@@ -37,7 +39,16 @@ export function restartRequired(snapshot: StackSnapshot, ctx: SidebarContext): b
 }
 
 function modelLabel(assignment: ModelAssignment): string {
-  return `${assignment.model}${assignment.variant ? ` [${assignment.variant}]` : ""}`;
+  const variant = normalizeVariant(assignment.variant);
+  return `${assignment.model}${variant ? ` [${variant}]` : ""}`;
+}
+
+function normalizeVariant(variant: string | null | undefined): string | undefined {
+  return variant && variant !== "default" ? variant : undefined;
+}
+
+function sameModel(a: ModelAssignment, b: ModelAssignment): boolean {
+  return a.model === b.model && normalizeVariant(a.variant) === normalizeVariant(b.variant);
 }
 
 export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext): ViewNode[] {
@@ -58,33 +69,39 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
     }
   }
 
-  // Configured stack chains, not the session-local runtime candidate.
-  nodes.push(text("Current Stack", { fg: theme.text, attributes: TEXT_ATTR_BOLD, marginTop: 1 }));
+  nodes.push(
+    text(`Current Stack · ${snapshot.active ?? "(none)"}`, {
+      fg: theme.text,
+      attributes: TEXT_ATTR_BOLD,
+      marginTop: 1,
+    }),
+  );
   if (snapshot.agents.length === 0) {
     nodes.push(text("• (none)", { fg: theme.textMuted }));
   } else {
-    nodes.push(text("Configured routing", { fg: theme.textMuted }));
+    nodes.push(text("Precedence ↓ · ● current", { fg: theme.textMuted }));
     for (const assignment of snapshot.agents) {
+      const chain = [assignment, ...(assignment.fallbacks ?? [])];
+      const current = ctx.current?.agent === assignment.agent ? ctx.current : undefined;
+      const selected = current ? chain.findIndex((model) => sameModel(model, current)) : -1;
+      const modelRow = (model: ModelAssignment, active: boolean, external = false) =>
+        text(`${active ? "● " : "  "}${external ? "Current · " : ""}${modelLabel(model)}`, {
+          fg: active ? theme.success : theme.textMuted,
+          attributes: active ? TEXT_ATTR_BOLD : 0,
+          wrapMode: "char",
+          width: "100%",
+        });
       nodes.push({
         kind: "box",
-        props: { flexDirection: "column" },
+        props: { flexDirection: "column", marginTop: 1 },
         children: [
-          {
-            kind: "box",
-            props: { flexDirection: "row", gap: 1 },
-            children: [
-              text("•", { flexShrink: 0, style: { fg: theme.success } }),
-              text(assignment.agent, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
-            ],
-          },
+          text(assignment.agent, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
           {
             kind: "box",
             props: { flexDirection: "column", paddingLeft: 2 },
             children: [
-              text(`Primary → ${modelLabel(assignment)}`, { fg: theme.textMuted }),
-              ...(assignment.fallbacks ?? []).map((fallback, index) =>
-                text(`Fallback ${index + 1} → ${modelLabel(fallback)}`, { fg: theme.textMuted }),
-              ),
+              ...chain.map((model, index) => modelRow(model, index === selected)),
+              ...(current && selected === -1 ? [modelRow(current, true, true)] : []),
             ],
           },
         ],

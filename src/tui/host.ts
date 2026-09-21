@@ -54,7 +54,10 @@ export interface DialogStack {
 
 export interface RouterTuiApi {
   readonly slots: {
-    register(plugin: { order?: number; slots: Record<string, () => unknown> }): unknown;
+    register(plugin: {
+      order?: number;
+      slots: Record<string, (sessionID?: string) => unknown>;
+    }): unknown;
   };
   readonly renderer: { requestRender(): void };
   readonly ui: {
@@ -67,4 +70,5 @@ export interface RouterTuiApi {
   readonly lifecycle: { onDispose(fn: () => void | Promise<void>): unknown };
   readonly theme?: { readonly current?: Record<string, unknown> };
   readonly state?: { readonly provider?: unknown };
+  readonly currentModel?: (sessionID: string) => import("./view.js").SidebarContext["current"];
 }

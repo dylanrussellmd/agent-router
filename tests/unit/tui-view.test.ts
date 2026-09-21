@@ -24,6 +24,70 @@ const snap = (
 });
 
 describe("buildSidebarNodes", () => {
+  const routing = [
+    {
+      agent: "build",
+      model: "a/primary",
+      fallbacks: [{ model: "b/fallback", variant: "high" }, { model: "c/last" }],
+    },
+    { agent: "explorer", model: "b/fallback", variant: "high" },
+  ];
+  const theme = { text: "TEXT", textMuted: "MUTED", success: "SELECTED" };
+  const rows = (nodes: ViewNode[]) =>
+    nodes.filter((n) => n.kind === "box").flatMap((n) => n.children?.[1]?.children ?? []);
+
+  it("highlights only the live agent's fallback without changing precedence", () => {
+    const nodes = buildSidebarNodes(snap("s", ["s"], routing), {
+      bootActive: "s",
+      theme,
+      current: { agent: "build", model: "b/fallback", variant: "high" },
+    });
+    expect(rows(nodes).map((n) => n.text)).toEqual([
+      "  a/primary",
+      "● b/fallback [high]",
+      "  c/last",
+      "  b/fallback [high]",
+    ]);
+    expect(rows(nodes).map((n) => n.props.fg)).toEqual(["MUTED", "SELECTED", "MUTED", "MUTED"]);
+    expect(rows(nodes)[1]?.props.attributes).toBe(1);
+    expect(rows(nodes).every((n) => n.props.wrapMode === "char" && n.props.width === "100%")).toBe(
+      true,
+    );
+  });
+
+  it("appends an explicit external current model, including mismatched variants", () => {
+    for (const current of [
+      { agent: "build", model: "external/org/model", variant: "high" },
+      { agent: "build", model: "b/fallback", variant: "low" },
+    ]) {
+      const nodes = buildSidebarNodes(snap("s", ["s"], routing), {
+        bootActive: "s",
+        theme,
+        current,
+      });
+      expect(
+        rows(nodes)
+          .slice(0, 3)
+          .map((n) => n.props.fg),
+      ).toEqual(["MUTED", "MUTED", "MUTED"]);
+      expect(rows(nodes)[3]?.text).toBe(`● Current · ${current.model} [${current.variant}]`);
+    }
+  });
+
+  it("normalizes default variants in both selection and labels", () => {
+    for (const configured of [undefined, null, "default"]) {
+      for (const live of [undefined, null, "default"]) {
+        const nodes = buildSidebarNodes(
+          snap("s", ["s"], [{ agent: "build", model: "a/model", variant: configured }]),
+          {
+            bootActive: "s",
+            current: { agent: "build", model: "a/model", variant: live },
+          },
+        );
+        expect(rows(nodes).map((n) => n.text)).toEqual(["● a/model"]);
+      }
+    }
+  });
   it("lists every stack — active checked green, inactive muted unchecked", () => {
     const nodes = buildSidebarNodes(snap("premium", ["cheap", "premium"]), {
       bootActive: "premium",
@@ -44,7 +108,7 @@ describe("buildSidebarNodes", () => {
   it("leaves one blank row between Agent Stacks and Current Stack", () => {
     for (const snapshot of [snap(null), snap("premium", ["cheap", "premium"])]) {
       const nodes = buildSidebarNodes(snapshot, { bootActive: snapshot.active });
-      const index = nodes.findIndex((node) => node.text === "Current Stack");
+      const index = nodes.findIndex((node) => node.text?.startsWith("Current Stack ·"));
       expect(nodes[index].props.marginTop).toBe(1);
       expect(nodes[index - 1].props.marginBottom ?? 0).toBe(0);
     }
@@ -81,15 +145,15 @@ describe("buildSidebarNodes", () => {
       { agent: "explorer", model: "claude-opus" },
     ];
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s" });
-    const headerIdx = nodes.findIndex((n) => n.text === "Current Stack");
+    const headerIdx = nodes.findIndex((n) => n.text?.startsWith("Current Stack ·"));
     expect(headerIdx).toBeGreaterThan(0);
-    expect(nodes[headerIdx + 1].text).toBe("Configured routing");
+    expect(nodes[headerIdx + 1].text).toBe("Precedence ↓ · ● current");
     const line1 = nodes[headerIdx + 2];
     const line2 = nodes[headerIdx + 3];
     expect(line1.kind).toBe("box");
     expect(line1.props.flexDirection).toBe("column");
-    expect(allText([line1])).toEqual(["•", "build", "Primary → gpt-5"]);
-    expect(allText([line2])).toEqual(["•", "explorer", "Primary → claude-opus"]);
+    expect(allText([line1])).toEqual(["build", "  gpt-5"]);
+    expect(allText([line2])).toEqual(["explorer", "  claude-opus"]);
   });
 
   it("renders ordered fallback models and explicit variants under their own agent", () => {
@@ -105,13 +169,12 @@ describe("buildSidebarNodes", () => {
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s" });
     const groups = nodes.filter((node) => node.kind === "box");
     expect(allText([groups[0]])).toEqual([
-      "•",
       "omni",
-      "Primary → a/primary [medium]",
-      "Fallback 1 → b/backup [high]",
-      "Fallback 2 → c/last",
+      "  a/primary [medium]",
+      "  b/backup [high]",
+      "  c/last",
     ]);
-    expect(allText([groups[1]])).toEqual(["•", "explorer", "Primary → a/fast"]);
+    expect(allText([groups[1]])).toEqual(["explorer", "  a/fast"]);
     expect(groups[0].children?.[1]?.props.paddingLeft).toBe(2);
     expect(allText(nodes).some((label) => /undefined|null|running/i.test(label))).toBe(false);
   });
@@ -125,15 +188,15 @@ describe("buildSidebarNodes", () => {
         bootActive: "s",
       }),
     );
-    expect(texts.filter((label) => label.startsWith("Fallback "))).toEqual(
-      fallbacks.map((fallback, i) => `Fallback ${i + 1} → ${fallback.model}`),
+    expect(texts.filter((label) => label.startsWith("  provider/"))).toEqual(
+      fallbacks.map((fallback) => `  ${fallback.model}`),
     );
   });
 
   it("shows (none) under Current Stack when the active stack has no agents", () => {
     const nodes = buildSidebarNodes(snap(null), { bootActive: null });
     const texts = nodes.map((n) => n.text);
-    const headerIdx = texts.indexOf("Current Stack");
+    const headerIdx = texts.indexOf("Current Stack · (none)");
     expect(texts[headerIdx + 1]).toBe("• (none)");
   });
 
@@ -141,16 +204,14 @@ describe("buildSidebarNodes", () => {
     const theme = { text: "TEXT", textMuted: "MUTED", success: "OK" };
     const agents = [{ agent: "build", model: "gpt-5", fallbacks: [{ model: "a/backup" }] }];
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s", theme });
-    const headerIdx = nodes.findIndex((n) => n.text === "Current Stack");
+    const headerIdx = nodes.findIndex((n) => n.text?.startsWith("Current Stack ·"));
     const line = nodes[headerIdx + 2];
     expect(line.kind).toBe("box");
     const heading = line.children?.[0];
-    expect(heading?.children?.[0]?.props.flexShrink).toBe(0);
-    expect(heading?.children?.[0]?.props.style).toEqual({ fg: "OK" });
-    expect(heading?.children?.[1]?.props.fg).toBe("TEXT");
-    expect(heading?.children?.[1]?.props.attributes).toBe(1);
+    expect(heading?.props.fg).toBe("TEXT");
+    expect(heading?.props.attributes).toBe(1);
     expect(line.children?.[1]?.children?.map((node) => node.props.fg)).toEqual(["MUTED", "MUTED"]);
-    expect(nodes.find((n) => n.text === "Current Stack")?.props.fg).toBe("TEXT");
+    expect(nodes.find((n) => n.text?.startsWith("Current Stack ·"))?.props.fg).toBe("TEXT");
   });
 });
 
@@ -226,8 +287,8 @@ describe("materialize", () => {
     const routing = group.children[1] as FakeNode;
     expect(routing.props.paddingLeft).toBe(2);
     expect(routing.children.map((child) => (child as FakeNode).children)).toEqual([
-      ["Primary → a/p"],
-      ["Fallback 1 → b/f"],
+      ["  a/p"],
+      ["  b/f"],
     ]);
   });
 });

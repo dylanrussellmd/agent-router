@@ -123,13 +123,18 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
 
   let snapshot = await readStackSnapshot(paths);
   const bootActive = snapshot.active;
-  const viewContext = () => ({ bootActive, theme: api.theme?.current });
+  const viewContext = (sessionID?: string) => ({
+    bootActive,
+    theme: api.theme?.current,
+    current: sessionID ? api.currentModel?.(sessionID) : undefined,
+  });
 
   try {
     api.slots.register({
       order: SIDEBAR_ORDER,
       slots: {
-        sidebar_content: () => materialize(buildSidebarNodes(snapshot, viewContext()), solid),
+        sidebar_content: (sessionID) =>
+          materialize(buildSidebarNodes(snapshot, viewContext(sessionID)), solid),
       },
     });
     debugLog("slots.register ok");
@@ -202,12 +207,12 @@ const agentRouterTui = {
             cleanups.push(
               ctx.ui.slot({
                 append: "sidebar.content",
-                render: () => {
+                render: (input) => {
                   const node = solid.createElement("box");
                   solid.setProp(node, "flexDirection", "column");
                   solid.insert(node, () => {
                     void revision.value;
-                    return render();
+                    return render(input.sessionID);
                   });
                   return node as never;
                 },
@@ -293,6 +298,25 @@ const agentRouterTui = {
           ),
       },
       lifecycle: { onDispose: (cleanup) => cleanups.push(cleanup) },
+      theme: {
+        get current() {
+          return {
+            text: ctx.theme.text.default,
+            textMuted: ctx.theme.text.subdued,
+            warning: ctx.theme.text.feedback.warning.default,
+            success: ctx.theme.text.feedback.success.default,
+          };
+        },
+      },
+      currentModel: (sessionID) => {
+        const session = ctx.data.session.get(sessionID);
+        if (!session?.agent || !session.model) return undefined;
+        return {
+          agent: session.agent,
+          model: `${session.model.providerID}/${session.model.id}`,
+          variant: session.model.variant ?? null,
+        };
+      },
       state: {
         get provider() {
           const models = ctx.data.location.model.list(ctx.location) ?? [];
