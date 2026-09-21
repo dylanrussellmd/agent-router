@@ -177,6 +177,101 @@ Duplicate failures advance only once per admitted user turn. Routing budgets are
 
 OpenCode 2.0.8 exposes no atomic compare-and-switch in the prompt hook and no request kind in the retry hook. Concurrent manual selections/admissions or auxiliary requests remain host API limitations. The sidebar displays configured routing and highlights the current session selection, not pending fallback state. Terminal stack operations require local filesystem access; remote server filesystem management is not supported.
 
+### Opt-in quota preflight (phase 1)
+
+The server plugin can consult the usage-tracker server's `direct-api-usage.query`
+RPC before each new explicit main-session prompt and each new native `subagent`
+start. Configure the server plugin using the object form:
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "@dylanrussell/agent-router",
+      "options": {
+        "quotaPreflight": {
+          "enabled": true,
+          "allowPaidFallbacks": false
+        }
+      }
+    }
+  ]
+}
+```
+
+Both options default to `false`. Existing applied fallback chains supply candidate
+order; preflight never writes agent frontmatter, router state, or stacks. A staged
+reactive fallback has precedence on the next eligible admission, even when the
+primary has available or unknown quota. Preflight checks that backup and later
+candidates for known exhaustion. Otherwise, each eligible admission reconsiders
+the configured primary. Retry hooks and same-turn retry behavior are unchanged.
+
+- Only fresh, account-and-scope-matched `exhausted` evidence skips a candidate.
+  An available or unknown primary remains the primary. Expired observations,
+  reached resets, unavailable methods, malformed replies, and timeouts are unknown.
+- After earlier candidates are exhausted, an unknown backup with a service-proven
+  subscription binding may be tried. Without that binding, selecting a backup
+  requires explicit `allowPaidFallbacks: true`, which permits potentially paid
+  configured backups. If no eligible candidate remains, selection is unchanged.
+- The usage service owns shared caching, bounded stale refreshes, credential
+  resolution, explicit Headroom/Go account bindings, and model-specific OpenAI
+  scope matching. Router receives opaque references and quota decisions only;
+  it neither polls providers nor infers account equivalence from provider names.
+- Quota queries have a 3-second caller deadline and at most 16 outstanding calls,
+  including timed-out calls that ignore cancellation. Excess admissions use
+  unknown evidence rather than joining a queue. Admission ownership is bounded
+  to 1,024 sessions and concurrent main admission checks to 64.
+- Explicit initial model selections and observable manual selections take priority,
+  including selections equal to the configured primary. Native child overrides
+  are checked before model resolution in `tool.execute.before`; resumed children
+  are excluded. Main sessions whose agent is unresolved are left native.
+- Automatic selection ownership is in memory. After plugin restart, a stored
+  model is conservatively treated as pinned; explicit pins also persist in
+  plugin-scoped server storage. A second session read and observed
+  selection events guard asynchronous admission, but the host offers no atomic
+  compare-and-switch.
+
+**Explicit session controls:** with preflight enabled, the server exposes three
+additional tools. Pin/auto tools are for explicit user requests, under the host's
+normal tool-permission policy. They take no model or session arguments; their
+scope is the calling session.
+
+- `router_pin` freezes the current selection, resolving the native agent/default
+  model when no selection is stored. It disables quota preflight and clears staged
+  reactive fallback for this session. The pin persists in server plugin storage.
+  Pins share one durable value capped at 1,024 sessions across restarts. Serialized
+  writes prevent lost updates; session deletion removes its durable pin, including
+  when deletion races a pin write. Plugin cleanup drains dispatched pin writes.
+- `router_auto` clears the explicit pin and authorizes automatic routing on the
+  **next explicit user turn**. It neither switches the model nor sends a prompt.
+  Automatic ownership is not restored across plugin restarts: use this control
+  again to opt an existing selected session back in.
+- `router_routing_status` reports `automatic`/`pinned`, the current model, and a
+  concise reason. Admissions and controls also write concise server-log notices
+  such as `primary_unknown`, `known_exhaustion_fallback`, and
+  `staged_reactive_fallback`.
+
+**Picker boundary:** OpenCode 2.0.8 treats selecting the already-active model as a
+no-op and emits no selection event. Selecting an automatic fallback again in the
+standard picker does **not** pin it. Explicitly request `router_pin` to freeze it;
+request `router_auto` when ready to resume automatic routing. Different-model
+picker selections remain observable and take priority.
+
+`npm run build && npm run test:quota` exercises the production router and a fake
+quota RPC on a private native 2.0.8 host, including true native child starts,
+fresh/exhausted/unknown/reset evidence, explicit pin/auto controls, staged 429/503
+precedence, timeout, recovery, and tool continuation without midtask switching.
+It explicitly reports the native same-model picker boundary.
+`scripts/probe-admission-v2.mjs` independently records
+native admission/provenance behavior. Neither script contacts real quota APIs.
+Set `USAGE_TRACKER_SOURCE` to the usage-tracker source directory to run the same
+native main/child checks with its actual RPC definition and quota implementation,
+using synthetic credentials and direct-provider response fixtures. Service-side
+account approvals belong in usage-tracker's `options.quotaBindings`, whose records
+use `{ providerID, source, models, connection: { type, id }, approval }` for saved
+credentials (`{ type: "env", name }` for environment connections). Router options
+do not contain credentials or binding attestations.
+
 ### Install This Checkout
 
 To test a local V2 checkout, run `npm run typecheck`, `npm test`, and `npm run build` (a fresh checkout uses `pnpm install --frozen-lockfile`). Replace the registry entry in the server `opencode.json` **plugins** array with the package directory:

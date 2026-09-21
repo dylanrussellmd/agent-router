@@ -1,6 +1,6 @@
 {
   "name": "@dylanrussell/agent-router",
-  "version": "2.0.2",
+  "version": "2.1.0",
   "description": "Switch the models assigned to your opencode agents. Named stacks applied to agent frontmatter. Plugin + CLI.",
   "license": "MIT",
   "author": "Dylan Russell",
@@ -51,6 +51,7 @@
     "test:cli": "vitest run tests/cli",
     "test:plugin": "vitest run tests/plugin",
     "test:integration": "node scripts/smoke-v2.mjs",
+    "test:quota": "node scripts/smoke-quota-v2.mjs",
     "test:watch": "vitest",
     "version": "node scripts/sync-version.mjs && git add src/version.ts",
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run test"

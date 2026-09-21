@@ -6,6 +6,7 @@ import { createFailover } from "./core/failover.js";
 import { RoutingEntrySchema } from "./core/schema.js";
 import { captureAgents } from "./core/stack-manager.js";
 import { AgentRouterPlugin } from "./plugin.js";
+import { createQuotaAdmission } from "./quota-v2.js";
 
 const variant = (value: string | null | undefined) =>
   value === "default" ? undefined : (value ?? undefined);
@@ -80,11 +81,56 @@ export async function setupV2(ctx: Context) {
   >();
   const kinds = new Map<string, string>();
   const ownSelections = new Map<string, string>();
+  const quota = createQuotaAdmission(ctx, routes, () => state() === initial);
+  if (quota) {
+    await ctx.tool.transform((editor) => {
+      const input = { type: "object", properties: {}, additionalProperties: false } as const;
+      for (const action of ["pin", "auto"] as const)
+        editor.add({
+          name: `router_${action}`,
+          description:
+            action === "pin"
+              ? "Only on an explicit user request: pin this session's current model and disable automatic quota/reactive routing. Takes no model or session arguments."
+              : "Only on an explicit user request: resume quota-aware routing for this session on its NEXT explicit user turn. Does not send a prompt or switch immediately.",
+          input,
+          async execute(_input, context) {
+            await quota.control(context.sessionID, action, async () => {
+              turns.delete(context.sessionID);
+              kinds.delete(context.sessionID);
+              await failover.event({
+                event: {
+                  type: "session.next.model.switched",
+                  properties: { sessionID: context.sessionID },
+                },
+              });
+            });
+            return { content: JSON.stringify(await quota.status(context.sessionID)) };
+          },
+        });
+      editor.add({
+        name: "router_routing_status",
+        description:
+          "Show this session's automatic/pinned routing mode, current model, and routing reason.",
+        input,
+        async execute(_input, context) {
+          return { content: JSON.stringify(await quota.status(context.sessionID)) };
+        },
+      });
+    });
+  }
   const controller = new AbortController();
   const events = (async () => {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
       if (!("sessionID" in event.data)) continue;
       const sessionID = String(event.data.sessionID);
+      if (
+        await quota?.event(
+          sessionID,
+          event.type,
+          event.type === "session.model.selected" ? event.data.model : undefined,
+        )
+      )
+        continue;
       if (!turns.has(sessionID)) continue;
       if (event.type === "session.model.selected") {
         const model = event.data.model;
@@ -117,6 +163,7 @@ export async function setupV2(ctx: Context) {
   await ctx.session.hook("model.request", (event) => {
     if (turns.has(event.sessionID)) kinds.set(event.sessionID, event.kind);
   });
+  if (quota) await ctx.tool.hook("execute.before", (event) => quota.child(event));
   await ctx.session.hook("prompt", async (event) => {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
     if (state() !== initial) {
@@ -125,6 +172,44 @@ export async function setupV2(ctx: Context) {
       return;
     }
     const session = await ctx.session.get({ sessionID: event.sessionID });
+    if (turns.get(event.sessionID)?.id === event.messageID) return;
+    if (quota) {
+      if (session.parentID && (await quota.isPinned(event.sessionID))) {
+        turns.delete(event.sessionID);
+        return;
+      }
+      const pending = failover.pending(event.sessionID);
+      const selected = session.parentID
+        ? session.model
+        : await quota.main(
+            event.sessionID,
+            session,
+            pending
+              ? {
+                  providerID: pending.providerID,
+                  id: pending.modelID,
+                  variant: pending.variant,
+                }
+              : undefined,
+          );
+      if (!selected || !session.agent || !routes[session.agent]) {
+        turns.delete(event.sessionID);
+        return;
+      }
+      const message = {
+        id: event.messageID,
+        agent: session.agent,
+        model: {
+          providerID: selected.providerID,
+          modelID: selected.id,
+          variant: variant(selected.variant),
+        },
+      };
+      failover.admit(event.sessionID, message);
+      if (!failover.active(event.sessionID)) return;
+      turns.set(event.sessionID, message);
+      return;
+    }
     if (!session.agent || !session.model || !routes[session.agent]) return;
     const message = {
       id: event.messageID,
@@ -212,6 +297,7 @@ export async function setupV2(ctx: Context) {
   });
   return async () => {
     controller.abort();
+    await quota?.dispose();
     failover.disable();
     turns.clear();
     kinds.clear();

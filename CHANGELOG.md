@@ -1,3 +1,11 @@
+# 2.1.0
+
+- Add opt-in account-scoped quota preflight before automatic main turns and new subagent tasks, using the usage service's credential-free RPC.
+- Skip only fresh confirmed exhausted candidates; unknown quota keeps the primary. Paid fallback requires explicit approval.
+- Add session-scoped `router_pin`, `router_auto`, and `router_routing_status` controls. Pins survive restarts with bounded storage and deletion cleanup.
+- Preserve staged next-turn reactive fallback precedence, manual overrides, and completed tools. No automatic mid-task retry is enabled.
+- Verify native main/child admission, quota recovery, durable pinning, timeout handling, and concurrent admission/disposal guards.
+
 # 2.0.2
 
 - Simplify stack chains to one model per line in precedence order, without Primary/Fallback labels.

@@ -81,9 +81,31 @@ export function createFailover(
   const notify = (message: string) => notice(`agent-router: ${message}`).catch(() => {});
 
   return {
+    pending(sessionID: string) {
+      const state = sessions.get(sessionID);
+      return enabled && !state?.disabled && state?.pending ? { ...state.pending } : undefined;
+    },
     active(sessionID: string) {
       const state = sessions.get(sessionID);
       return enabled && Boolean(state?.turn) && !state?.disabled;
+    },
+    /** Register an admission already selected by a separate policy; no retry occurs. */
+    admit(sessionID: string, message: { id: string; agent: string; model: Selection }) {
+      if (!enabled) return;
+      const chain = chains.get(message.agent);
+      const index = chain?.findIndex((candidate) => same(candidate, message.model)) ?? -1;
+      if (index < 0 || (!sessions.has(sessionID) && sessions.size >= 1024)) return;
+      const state: Session = sessions.get(sessionID) ?? { disabled: false, indices: new Map() };
+      state.disabled = false;
+      state.indices.set(message.agent, index);
+      state.pending = undefined;
+      state.turn = {
+        agent: message.agent,
+        parent: message.id,
+        model: { ...message.model },
+        handled: false,
+      };
+      sessions.set(sessionID, state);
     },
     disable() {
       enabled = false;
