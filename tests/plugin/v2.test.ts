@@ -17,7 +17,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function fixture() {
+async function fixture(defaultVariant = false) {
   const root = mkdtempSync(path.join(tmpdir(), "ar-v2-"));
   const agents = path.join(root, "agents");
   mkdirSync(agents);
@@ -25,7 +25,7 @@ async function fixture() {
   const agentPath = path.join(agents, "build.md");
   writeFileSync(
     agentPath,
-    "---\nmodel: headroom/deepseek#high\npermissions: []\n---\nUser-owned prompt\n",
+    `---\nmodel: headroom/deepseek${defaultVariant ? "" : "#high"}\npermissions: []\n---\nUser-owned prompt\n`,
   );
   const statePath = path.join(root, "state.json");
   writeFileSync(
@@ -38,8 +38,8 @@ async function fixture() {
       fallbackAgents: {
         build: {
           model: "headroom/deepseek",
-          variant: "high",
-          fallbacks: [{ model: "headroom/kimi", variant: "high" }],
+          ...(defaultVariant ? {} : { variant: "high" }),
+          fallbacks: [{ model: "headroom/kimi", ...(defaultVariant ? {} : { variant: "high" }) }],
         },
       },
     }),
@@ -52,11 +52,13 @@ async function fixture() {
   const tools: Record<string, TestTool> = {};
   let session = {
     agent: "build",
-    model: { providerID: "headroom", id: "deepseek", variant: "high" },
+    model: { providerID: "headroom", id: "deepseek", variant: defaultVariant ? "default" : "high" },
   };
   const switchModel = vi.fn(async ({ model }) => {
     session = { ...session, model };
   });
+  const queue: unknown[] = [];
+  let wake: (() => void) | undefined;
   const ctx = {
     model: {
       list: async () => ({
@@ -78,16 +80,21 @@ async function fixture() {
     },
     event: {
       async *subscribe({ signal }: { signal: AbortSignal }) {
-        await new Promise<void>((resolve) =>
-          signal.addEventListener("abort", () => resolve(), { once: true }),
-        );
+        signal.addEventListener("abort", () => wake?.(), { once: true });
+        while (!signal.aborted) {
+          if (!queue.length)
+            await new Promise<void>((resolve) => {
+              wake = resolve;
+            });
+          while (queue.length) yield queue.shift();
+        }
       },
     },
     session: {
       hook: async (name: string, hook: (event: unknown) => Promise<void>) => {
         hooks[name] = hook;
       },
-      get: async () => session,
+      get: vi.fn(async () => session),
       switchModel,
       prompt: vi.fn(),
       synthetic: vi.fn(),
@@ -118,6 +125,11 @@ async function fixture() {
     failure,
     statePath,
     agentPath,
+    emit: async (type: string, data: Record<string, unknown> = {}) => {
+      queue.push({ type, data: { sessionID: "s", ...data } });
+      wake?.();
+      await new Promise((resolve) => setImmediate(resolve));
+    },
     cleanup: async () => {
       await cleanup?.();
       rmSync(root, { recursive: true, force: true });
@@ -126,6 +138,62 @@ async function fixture() {
 }
 
 describe("OpenCode 2.0.8 adapter", () => {
+  it("normalizes the real host's default variant and recognizes its own selection event", async () => {
+    const f = await fixture(true);
+    try {
+      await f.prompt("first");
+      expect((await f.failure(429)).decision.retry).toBe(false);
+      await f.prompt("next");
+      expect(f.switchModel).toHaveBeenCalledExactlyOnceWith({
+        sessionID: "s",
+        model: { providerID: "headroom", id: "kimi" },
+      });
+      await f.emit("session.model.selected", {
+        model: { providerID: "headroom", id: "kimi", variant: "default" },
+      });
+      expect((await f.failure(503)).decision.retry).toBe(false);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it.each([
+    "session.execution.interrupted",
+    "session.agent.selected",
+    "session.model.selected",
+    "session.deleted",
+  ])("discards pending fallback on %s", async (type) => {
+    const f = await fixture();
+    try {
+      const before = readFileSync(f.agentPath, "utf8");
+      await f.prompt("first");
+      await f.failure(429);
+      await f.emit(type, { model: { providerID: "headroom", id: "manual" } });
+      await f.prompt("next");
+      expect(f.switchModel).not.toHaveBeenCalled();
+      expect(readFileSync(f.agentPath, "utf8")).toBe(before);
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("does not overwrite a model selection racing next-turn admission", async () => {
+    const f = await fixture();
+    try {
+      await f.prompt("first");
+      await f.failure(429);
+      const original = await f.ctx.session.get();
+      f.ctx.session.get.mockResolvedValueOnce(original).mockResolvedValueOnce({
+        ...original,
+        model: { providerID: "headroom", id: "manual", variant: "high" },
+      });
+      await f.prompt("next");
+      expect(f.switchModel).not.toHaveBeenCalled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   it.each([429, 500, 502, 503, 504])(
     "defers HTTP %s fallback until a new user turn and never replays",
     async (status) => {

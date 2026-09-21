@@ -7,6 +7,9 @@ import { RoutingEntrySchema } from "./core/schema.js";
 import { captureAgents } from "./core/stack-manager.js";
 import { AgentRouterPlugin } from "./plugin.js";
 
+const variant = (value: string | null | undefined) =>
+  value === "default" ? undefined : (value ?? undefined);
+
 /** 2.0.8: model refs are readonly in context hooks; switch only at user admission. */
 export async function setupV2(ctx: Context) {
   const legacy = await AgentRouterPlugin(
@@ -48,7 +51,20 @@ export async function setupV2(ctx: Context) {
         variant: entry.variant,
         fallbacks: entry.fallbacks,
       });
-      return parsed.success && parsed.data.fallbacks?.length ? [[id, parsed.data]] : [];
+      if (!parsed.success || !parsed.data.fallbacks?.length) return [];
+      return [
+        [
+          id,
+          {
+            ...parsed.data,
+            variant: variant(parsed.data.variant),
+            fallbacks: parsed.data.fallbacks.map((entry) => ({
+              ...entry,
+              variant: variant(entry.variant),
+            })),
+          },
+        ],
+      ];
     }),
   );
   const failover = createFailover(routes, async (message) => {
@@ -73,7 +89,8 @@ export async function setupV2(ctx: Context) {
       if (event.type === "session.model.selected") {
         const model = event.data.model;
         if (
-          ownSelections.get(sessionID) === `${model.providerID}/${model.id}#${model.variant ?? ""}`
+          ownSelections.get(sessionID) ===
+          `${model.providerID}/${model.id}#${variant(model.variant) ?? ""}`
         ) {
           ownSelections.delete(sessionID);
           continue;
@@ -115,7 +132,7 @@ export async function setupV2(ctx: Context) {
       model: {
         providerID: session.model.providerID,
         modelID: session.model.id,
-        variant: session.model.variant,
+        variant: variant(session.model.variant),
       },
     };
     const before = JSON.stringify(message.model);

@@ -1,3 +1,10 @@
+# 2.0.1
+
+- Normalize V2's `default` variant so pending next-user-turn fallback is not disabled by an equivalent model reference.
+- Pass the native catalog into `router_back` validation instead of launching the obsolete CLI model command.
+- Verify real isolated 2.0.8 HTTP 429/503 failover without replay, explicit model override, stack switching, undo, history and fixture integrity.
+- Patch development dependencies; the full dependency audit reports no known advisories.
+
 # 2.0.0
 
 - Target OpenCode 2.0.8 with server and terminal `setup` entrypoints.

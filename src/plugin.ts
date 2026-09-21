@@ -321,7 +321,9 @@ export const AgentRouterPlugin = async (
         async execute(args) {
           try {
             failover.disable();
-            const r = await backCore(paths, args.n ?? 1);
+            const r = await backCore(paths, args.n ?? 1, {
+              ...(validateOptions ? { validateOptions } : {}),
+            });
             await safeToast(
               client,
               `agent-router: reverted to "${r.current}". Restart opencode for change to take effect.`,
