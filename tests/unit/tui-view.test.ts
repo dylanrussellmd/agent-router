@@ -49,7 +49,7 @@ describe("buildSidebarNodes", () => {
       "● b/fallback [high]",
     ]);
     expect(rows(nodes).map((n) => n.props.fg)).toEqual(["MUTED", "ORANGE", "MUTED", "ORANGE"]);
-    expect(rows(nodes)[1]?.props.attributes).toBe(1);
+    expect(rows(nodes)[1]?.props.attributes).toBe(0);
     expect(rows(nodes).every((n) => n.props.wrapMode === "char" && n.props.width === "100%")).toBe(
       true,
     );
@@ -64,7 +64,7 @@ describe("buildSidebarNodes", () => {
       "● b/fallback [high]",
     ]);
     expect(rows(nodes).map((n) => n.props.fg)).toEqual(["ORANGE", "MUTED", "MUTED", "ORANGE"]);
-    expect(rows(nodes).map((n) => n.props.attributes)).toEqual([1, 0, 0, 1]);
+    expect(rows(nodes).map((n) => n.props.attributes)).toEqual([0, 0, 0, 0]);
   });
 
   it("prefers active child selections for other agents", () => {
@@ -160,7 +160,7 @@ describe("buildSidebarNodes", () => {
         { agent: "build", model: "c/last" },
       ],
     });
-    expect(allText(nodes)).toContain("build · active children · multiple models");
+    expect(allText(nodes)).toContain("build");
     expect(
       rows(nodes)
         .slice(0, 3)
@@ -174,7 +174,7 @@ describe("buildSidebarNodes", () => {
       theme,
       defaults: [{ agent: "build", model: "b/fallback", variant: "high" }],
     });
-    expect(allText(nodes)).toContain("build · native default");
+    expect(allText(nodes)).toContain("build");
     expect(
       rows(nodes)
         .slice(0, 3)
@@ -245,8 +245,8 @@ describe("buildSidebarNodes", () => {
     const line2 = nodes[headerIdx + 4];
     expect(line1.kind).toBe("box");
     expect(line1.props.flexDirection).toBe("column");
-    expect(allText([line1])).toEqual(["build · stack default", "● gpt-5"]);
-    expect(allText([line2])).toEqual(["explorer · stack default", "● claude-opus"]);
+    expect(allText([line1])).toEqual(["build", "● gpt-5"]);
+    expect(allText([line2])).toEqual(["explorer", "● claude-opus"]);
   });
 
   it("renders ordered fallback models and explicit variants under their own agent", () => {
@@ -262,12 +262,12 @@ describe("buildSidebarNodes", () => {
     const nodes = buildSidebarNodes(snap("s", ["s"], agents), { bootActive: "s" });
     const groups = nodes.filter((node) => node.kind === "box");
     expect(allText([groups[0]])).toEqual([
-      "omni · stack default",
+      "omni",
       "● a/primary [medium]",
       "  b/backup [high]",
       "  c/last",
     ]);
-    expect(allText([groups[1]])).toEqual(["explorer · stack default", "● a/fast"]);
+    expect(allText([groups[1]])).toEqual(["explorer", "● a/fast"]);
     expect(groups[0].children?.[1]?.props.paddingLeft).toBe(2);
     expect(allText(nodes).some((label) => /undefined|null|running/i.test(label))).toBe(false);
   });

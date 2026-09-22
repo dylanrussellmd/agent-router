@@ -1,3 +1,8 @@
+# 2.1.2
+
+- Remove selection-source labels from agent headings; show only the agent name.
+- Keep selected models orange with normal font weight. Selection logic and precedence are unchanged.
+
 # 2.1.1
 
 - Highlight selected models for every agent in the native warning/orange color, preserving precedence order and complete identities.

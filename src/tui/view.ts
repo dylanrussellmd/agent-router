@@ -130,17 +130,10 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
       const unique = selections.filter(
         (entry, index) => selections.findIndex((other) => sameModel(entry, other)) === index,
       );
-      const source = current
-        ? "viewed session"
-        : children.length
-          ? `active children${unique.length > 1 ? " · multiple models" : ""}`
-          : configured
-            ? "native default"
-            : "stack default";
       const modelRow = (model: ModelAssignment, active: boolean) =>
         text(`${active ? "● " : "  "}${modelLabel(model)}`, {
           fg: active ? theme.warning : theme.textMuted,
-          attributes: active ? TEXT_ATTR_BOLD : 0,
+          attributes: 0,
           wrapMode: "char",
           width: "100%",
         });
@@ -148,7 +141,7 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
         kind: "box",
         props: { flexDirection: "column", marginTop: 1 },
         children: [
-          text(`${assignment.agent} · ${source}`, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
+          text(assignment.agent, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
           {
             kind: "box",
             props: { flexDirection: "column", paddingLeft: 2 },
