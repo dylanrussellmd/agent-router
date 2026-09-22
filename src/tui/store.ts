@@ -71,18 +71,20 @@ export async function readStackSnapshot(paths: RouterPaths): Promise<StackSnapsh
   return { active, stacks, agents, key: snapshotKey(active, stacks, agents) };
 }
 
-export interface SidebarPollerOptions {
-  readonly read: () => Promise<StackSnapshot>;
+export interface SidebarPollerOptions<T extends { readonly key: string } = StackSnapshot> {
+  readonly read: () => Promise<T>;
   readonly intervalMs: number;
-  readonly initial: StackSnapshot;
-  readonly onChange: (next: StackSnapshot, prev: StackSnapshot) => void;
+  readonly initial: T;
+  readonly onChange: (next: T, prev: T) => void;
   /** Injectable for tests; defaults to global setTimeout/clearTimeout. */
   readonly schedule?: (fn: () => void, ms: number) => unknown;
   readonly cancel?: (handle: unknown) => void;
 }
 
 /** Chained-timeout poller with in-flight guard. Returns a stop function. */
-export function createSidebarPoller(options: SidebarPollerOptions): () => void {
+export function createSidebarPoller<T extends { readonly key: string }>(
+  options: SidebarPollerOptions<T>,
+): () => void {
   const schedule = options.schedule ?? ((fn, ms) => setTimeout(fn, ms) as unknown);
   const cancel =
     options.cancel ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));

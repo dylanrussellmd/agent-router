@@ -1,3 +1,10 @@
+# 2.1.1
+
+- Highlight selected models for every agent in the native warning/orange color, preserving precedence order and complete identities.
+- Prefer the viewed session, then running same-location direct children, then native defaults and stack defaults; label the source explicitly.
+- Preserve multiple selections when active children of one agent use different models. Never treat inactive children or other locations as live selections.
+- Keep routing mode/freshness unknown when no native status transport is connected; do not infer pin state from a model ID.
+
 # 2.1.0
 
 - Add opt-in account-scoped quota preflight before automatic main turns and new subagent tasks, using the usage service's credential-free RPC.

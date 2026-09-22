@@ -21,7 +21,10 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
   writeFileSync(
     path.join(root, "stacks", "sample.json"),
     JSON.stringify({
-      agents: { build: { model: "test/model", fallbacks: [{ model: "test/backup" }] } },
+      agents: {
+        build: { model: "test/model", fallbacks: [{ model: "test/backup" }] },
+        explorer: { model: "test/slow" },
+      },
     }),
   );
   writeFileSync(
@@ -47,7 +50,46 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
   const select = vi.fn(async () => undefined);
   const toast = vi.fn();
   const revision = { value: 0 };
-  let session = { agent: "build", model: { providerID: "test", id: "backup", variant: "default" } };
+  let session = {
+    id: "session",
+    location: { directory: "/project" },
+    agent: "build",
+    model: { providerID: "test", id: "backup", variant: "default" },
+    time: { updated: 50 },
+  };
+  // Viewed parent, conflicting active children, and an unrelated child.
+  const siblings = [
+    {
+      id: "child-1",
+      parentID: "session",
+      location: { directory: "/project" },
+      agent: "explorer",
+      model: { providerID: "test", id: "fast" },
+      time: { updated: 100 },
+    },
+    {
+      id: "child-2",
+      parentID: "session",
+      location: { directory: "/project" },
+      agent: "explorer",
+      model: { providerID: "test", id: "slow" },
+      time: { updated: 200 },
+    },
+    {
+      id: "alien",
+      parentID: "elsewhere",
+      location: { directory: "/project" },
+      agent: "explorer",
+      model: { providerID: "test", id: "alien" },
+      time: { updated: 300 },
+    },
+  ];
+  const roots: Record<string, string> = {
+    session: "session",
+    "child-1": "session",
+    "child-2": "session",
+    alien: "elsewhere",
+  };
   const theme = {
     text: {
       default: "BASE",
@@ -65,7 +107,12 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
     },
     renderer: { requestRender: vi.fn() },
     data: {
-      session: { get: vi.fn(() => session) },
+      session: {
+        get: vi.fn(() => session),
+        list: vi.fn(() => [session, ...siblings]),
+        root: vi.fn((id: string) => roots[id] ?? id),
+        status: vi.fn(() => "running"),
+      },
       location: { model: { list: () => [{ providerID: "test", id: "model" }] } },
     },
     ui: { slot, toast: { show: toast }, dialog: { select, confirm: vi.fn(), clear: vi.fn() } },
@@ -104,26 +151,54 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
           : node.children.flatMap((child) => (typeof child === "object" ? texts(child) : []));
       const rows = () => texts(render());
       expect(rows().find((n) => n.children[0] === "Agent Stacks")?.fg).toBe("BASE");
-      expect(rows().find((n) => n.children[0] === "● test/backup")?.fg).toBe("SUCCESS");
+      // Viewed session's live fallback selection, orange.
+      expect(rows().find((n) => n.children[0] === "● test/backup")?.fg).toBe("WARNING");
+      // Conflicting active children retain both selections, orange.
+      expect(rows().find((n) => n.children[0] === "● test/slow")?.fg).toBe("WARNING");
+      expect(rows().find((n) => n.children[0] === "● test/fast")?.fg).toBe("WARNING");
+      // An unrelated family's session never leaks into the sidebar.
+      expect(rows().some((n) => String(n.children[0]).includes("alien"))).toBe(false);
+      ctx.data.session.status.mockReturnValue("idle");
+      expect(rows().some((n) => n.children[0] === "● test/fast")).toBe(false);
+      ctx.data.session.status.mockReturnValue("running");
+      siblings[0].location.directory = "/other";
+      expect(rows().some((n) => n.children[0] === "● test/fast")).toBe(false);
+      siblings[0].location.directory = "/project";
+      expect(rows().some((n) => n.children[0] === "Routing · unknown · freshness unknown")).toBe(
+        true,
+      );
       expect(
         rows()
           .filter((n) => String(n.children[0]).includes("test/"))
           .map((n) => n.children[0]),
-      ).toEqual(["  test/model", "● test/backup"]);
+      ).toEqual(["  test/model", "● test/backup", "● test/slow", "● test/fast"]);
       session = {
+        id: "session",
+        location: { directory: "/project" },
         agent: "build",
         model: { providerID: "external", id: "override", variant: "high" },
+        time: { updated: 60 },
       };
-      expect(rows().find((n) => n.children[0] === "● Current · external/override [high]")?.fg).toBe(
-        "SUCCESS",
+      expect(rows().find((n) => n.children[0] === "● external/override [high]")?.fg).toBe(
+        "WARNING",
       );
-      session = { agent: "build", model: { providerID: "test", id: "model", variant: "default" } };
-      expect(rows().find((n) => n.children[0] === "● test/model")?.fg).toBe("SUCCESS");
-      theme.text.feedback.success.default = "NEW_SUCCESS";
-      expect(rows().find((n) => n.children[0] === "● test/model")?.fg).toBe("NEW_SUCCESS");
+      session = {
+        id: "session",
+        location: { directory: "/project" },
+        agent: "build",
+        model: { providerID: "test", id: "model", variant: "default" },
+        time: { updated: 70 },
+      };
+      expect(rows().find((n) => n.children[0] === "● test/model")?.fg).toBe("WARNING");
+      // The selection color tracks theme.text.feedback.warning.default, not success.
+      theme.text.feedback.warning.default = "NEW_ORANGE";
+      expect(rows().find((n) => n.children[0] === "● test/model")?.fg).toBe("NEW_ORANGE");
       expect(rows().some((n) => String(n.children[0]).includes("[default]"))).toBe(false);
+      // Switching the viewed session to explorer demotes build to its
+      // configured default; the off-chain live model stays a separate row.
       session = { ...session, agent: "explorer" };
-      expect(rows().find((n) => n.children[0] === "  test/model")?.fg).toBe("MUTED");
+      expect(rows().filter((n) => n.children[0] === "● test/model")).toHaveLength(2);
+      expect(rows().find((n) => n.children[0] === "  test/backup")?.fg).toBe("MUTED");
       expect(ctx.data.session.get).toHaveBeenCalledWith("session");
       expect(commands.map((command) => command.slash.name)).toEqual([
         "agent-status",

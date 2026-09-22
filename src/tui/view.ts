@@ -19,12 +19,33 @@ export interface SidebarTheme {
   readonly success?: unknown;
 }
 
+/** Live model selection observed for one agent in a session. */
+export interface LiveSelection extends ModelAssignment {
+  readonly agent: string;
+}
+
+/** Routing mode of the viewed session, as reported by the status service. */
+export interface RoutingStatus {
+  readonly mode: "automatic" | "pinned";
+  readonly reason?: string | undefined;
+  /** Epoch ms of the last quota evaluation behind the current mode, if tracked. */
+  readonly checkedAt?: number | null | undefined;
+}
+
 export interface SidebarContext {
   /** Active stack when the TUI booted — differing means a restart is due. */
   readonly bootActive: string | null;
   readonly theme?: SidebarTheme | undefined;
   /** Only the agent/model from this sidebar's live session may be marked current. */
   readonly current?: (ModelAssignment & { readonly agent: string }) | undefined;
+  /**
+   * Selections of running direct children of the viewed session, at its location.
+   * Conflicting models are all retained. The viewed session takes precedence.
+   */
+  readonly live?: readonly LiveSelection[] | undefined;
+  readonly defaults?: readonly LiveSelection[] | undefined;
+  /** Routing mode of the viewed session; omitted when no status source answers. */
+  readonly routing?: RoutingStatus | undefined;
 }
 
 /** Mirrors @opentui/core's TextAttributes.BOLD bitflag — opentui is host-provided and never imported here (see render.ts). */
@@ -49,6 +70,10 @@ function normalizeVariant(variant: string | null | undefined): string | undefine
 
 function sameModel(a: ModelAssignment, b: ModelAssignment): boolean {
   return a.model === b.model && normalizeVariant(a.variant) === normalizeVariant(b.variant);
+}
+
+function quotaAge(checkedAt: number, now = Date.now()): string {
+  return `${Math.max(0, Math.round((now - checkedAt) / 1000))}s ago`;
 }
 
 export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext): ViewNode[] {
@@ -76,17 +101,45 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
       marginTop: 1,
     }),
   );
+  if (ctx.routing) {
+    const parts = [`Routing · ${ctx.routing.mode === "pinned" ? "Pinned" : "Automatic"}`];
+    if (ctx.routing.reason) parts.push(ctx.routing.reason);
+    parts.push(
+      ctx.routing.checkedAt != null
+        ? `quota ${quotaAge(ctx.routing.checkedAt)}`
+        : "quota freshness unknown",
+    );
+    nodes.push(text(parts.join(" · "), { fg: theme.textMuted }));
+  } else {
+    nodes.push(text("Routing · unknown · freshness unknown", { fg: theme.textMuted }));
+  }
   if (snapshot.agents.length === 0) {
     nodes.push(text("• (none)", { fg: theme.textMuted }));
   } else {
-    nodes.push(text("Precedence ↓ · ● current", { fg: theme.textMuted }));
+    nodes.push(text("Precedence ↓ · ● selected", { fg: theme.textMuted }));
     for (const assignment of snapshot.agents) {
       const chain = [assignment, ...(assignment.fallbacks ?? [])];
       const current = ctx.current?.agent === assignment.agent ? ctx.current : undefined;
-      const selected = current ? chain.findIndex((model) => sameModel(model, current)) : -1;
-      const modelRow = (model: ModelAssignment, active: boolean, external = false) =>
-        text(`${active ? "● " : "  "}${external ? "Current · " : ""}${modelLabel(model)}`, {
-          fg: active ? theme.success : theme.textMuted,
+      const children = (ctx.live ?? []).filter((entry) => entry.agent === assignment.agent);
+      const configured = ctx.defaults?.find((entry) => entry.agent === assignment.agent);
+      const selections = current
+        ? [current]
+        : children.length
+          ? children
+          : [configured ?? assignment];
+      const unique = selections.filter(
+        (entry, index) => selections.findIndex((other) => sameModel(entry, other)) === index,
+      );
+      const source = current
+        ? "viewed session"
+        : children.length
+          ? `active children${unique.length > 1 ? " · multiple models" : ""}`
+          : configured
+            ? "native default"
+            : "stack default";
+      const modelRow = (model: ModelAssignment, active: boolean) =>
+        text(`${active ? "● " : "  "}${modelLabel(model)}`, {
+          fg: active ? theme.warning : theme.textMuted,
           attributes: active ? TEXT_ATTR_BOLD : 0,
           wrapMode: "char",
           width: "100%",
@@ -95,13 +148,20 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
         kind: "box",
         props: { flexDirection: "column", marginTop: 1 },
         children: [
-          text(assignment.agent, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
+          text(`${assignment.agent} · ${source}`, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
           {
             kind: "box",
             props: { flexDirection: "column", paddingLeft: 2 },
             children: [
-              ...chain.map((model, index) => modelRow(model, index === selected)),
-              ...(current && selected === -1 ? [modelRow(current, true, true)] : []),
+              ...chain.map((model) =>
+                modelRow(
+                  model,
+                  unique.some((selected) => sameModel(model, selected)),
+                ),
+              ),
+              ...unique
+                .filter((selected) => !chain.some((model) => sameModel(model, selected)))
+                .map((selected) => modelRow(selected, true)),
             ],
           },
         ],

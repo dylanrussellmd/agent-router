@@ -24,9 +24,10 @@ import {
 import type { RouterTuiApi, TuiCommandEntry } from "./host.js";
 import { type SolidRuntime, materialize } from "./render.js";
 import { createSidebarPoller, readStackSnapshot } from "./store.js";
-import { buildSidebarNodes } from "./view.js";
+import { type RoutingStatus, buildSidebarNodes } from "./view.js";
 
 const POLL_INTERVAL_MS = 1500;
+const ROUTING_INTERVAL_MS = 3000;
 const SIDEBAR_ORDER = 850;
 
 /**
@@ -123,18 +124,28 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
 
   let snapshot = await readStackSnapshot(paths);
   const bootActive = snapshot.active;
+  // Cached routing status of the viewed session; refreshed by a separate
+  // poller so render stays synchronous. Undefined = no status source.
+  let routing: RoutingStatus | undefined;
+  let routingSessionID: string | undefined;
+  let lastSessionID: string | undefined;
   const viewContext = (sessionID?: string) => ({
     bootActive,
     theme: api.theme?.current,
     current: sessionID ? api.currentModel?.(sessionID) : undefined,
+    live: sessionID ? api.liveSelections?.(sessionID) : undefined,
+    defaults: api.configuredModels?.(),
+    routing: sessionID === routingSessionID ? routing : undefined,
   });
 
   try {
     api.slots.register({
       order: SIDEBAR_ORDER,
       slots: {
-        sidebar_content: (sessionID) =>
-          materialize(buildSidebarNodes(snapshot, viewContext(sessionID)), solid),
+        sidebar_content: (sessionID) => {
+          if (sessionID) lastSessionID = sessionID;
+          return materialize(buildSidebarNodes(snapshot, viewContext(sessionID)), solid);
+        },
       },
     });
     debugLog("slots.register ok");
@@ -172,6 +183,29 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
     },
   });
 
+  const stopRouting = api.routingStatus
+    ? createSidebarPoller<{
+        routing: RoutingStatus | undefined;
+        sessionID: string | undefined;
+        key: string;
+      }>({
+        read: async () => {
+          const sessionID = lastSessionID;
+          const status = sessionID
+            ? await api.routingStatus?.(sessionID).catch(() => undefined)
+            : undefined;
+          return { routing: status, sessionID, key: JSON.stringify([sessionID, status ?? null]) };
+        },
+        intervalMs: ROUTING_INTERVAL_MS,
+        initial: { routing: undefined, sessionID: undefined, key: "boot" },
+        onChange: (next) => {
+          routing = next.routing;
+          routingSessionID = next.sessionID;
+          api.renderer.requestRender();
+        },
+      })
+    : undefined;
+
   const deps: DialogDeps = { api, paths, refresh };
   const status = () =>
     api.ui.toast({
@@ -188,6 +222,7 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
   }
 
   api.lifecycle.onDispose(stopPolling);
+  if (stopRouting) api.lifecycle.onDispose(stopRouting);
   debugLog(`tui() init complete — active=${snapshot.active ?? "(none)"}`);
 };
 
@@ -317,6 +352,43 @@ const agentRouterTui = {
           variant: session.model.variant ?? null,
         };
       },
+      liveSelections: (sessionID) => {
+        // Only running direct children of the viewed parent, at its location.
+        // Preserve conflicts: several children can select different models.
+        const sessions = ctx.data.session;
+        if (typeof sessions.list !== "function" || typeof sessions.status !== "function") return [];
+        try {
+          const parent = sessions.get(sessionID);
+          if (!parent?.location) return [];
+          const selections: import("./view.js").LiveSelection[] = [];
+          for (const session of sessions.list()) {
+            if (session.parentID !== sessionID || !session.agent || !session.model) continue;
+            if (session.location?.directory !== parent.location.directory) continue;
+            if (sessions.status(session.id) !== "running") continue;
+            const { agent, model } = session;
+            selections.push({
+              agent,
+              model: `${model.providerID}/${model.id}`,
+              variant: model.variant ?? null,
+            });
+          }
+          return selections;
+        } catch {
+          return [];
+        }
+      },
+      configuredModels: () =>
+        (ctx.data.location.agent?.list(ctx.location) ?? []).flatMap((agent) =>
+          agent.model
+            ? [
+                {
+                  agent: agent.name,
+                  model: `${agent.model.providerID}/${agent.model.id}`,
+                  variant: agent.model.variant ?? null,
+                },
+              ]
+            : [],
+        ),
       state: {
         get provider() {
           const models = ctx.data.location.model.list(ctx.location) ?? [];
