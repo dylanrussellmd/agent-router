@@ -9,6 +9,7 @@ import {
   quotaCandidate,
 } from "./core/quota-preflight.js";
 import type { RoutingEntry } from "./core/schema.js";
+import { QuotaFallbackOptions } from "./quota-fallback-v2.js";
 
 type Model = { providerID: string; id: string; variant?: string | undefined };
 type Session = {
@@ -27,8 +28,10 @@ export function createQuotaAdmission(
   current: () => boolean,
 ) {
   const parsed = QuotaOptions.safeParse(ctx.options?.quotaPreflight ?? {});
-  if (!parsed.success || !parsed.data.enabled) return undefined;
-  const options = parsed.data;
+  const fallback = QuotaFallbackOptions.safeParse(ctx.options?.quotaFallback ?? {});
+  if ((!parsed.success || !parsed.data.enabled) && (!fallback.success || !fallback.data.enabled))
+    return undefined;
+  const options = parsed.success ? parsed.data : { enabled: false, allowPaidFallbacks: false };
   // Lazy lookup tolerates service plugin ordering and absent query registrations.
   const query = createQuotaQuery((input, request) => ctx.rpc(UsageQuota).query(input, request));
   const owned = new Map<string, { agent: string; model: string }>();
@@ -69,7 +72,7 @@ export function createQuotaAdmission(
             (other) => other.providerID === entry.providerID && other.id === entry.id,
           ) === index,
       );
-    const results = await query.read(candidates);
+    const results = options.enabled ? await query.read(candidates) : [];
     // Evaluate at the final decision, including after any further host reads.
     return () => {
       const now = Date.now();
@@ -85,7 +88,11 @@ export function createQuotaAdmission(
             ),
           )
         : 0;
-      const choice = chooseQuotaRoute(route, results, options.allowPaidFallbacks, now, startIndex);
+      const choice = options.enabled
+        ? chooseQuotaRoute(route, results, options.allowPaidFallbacks, now, startIndex)
+        : pending
+          ? [route, ...(route.fallbacks ?? [])][startIndex]
+          : route;
       return {
         choice,
         reason: !choice
@@ -102,6 +109,44 @@ export function createQuotaAdmission(
   };
   return {
     isPinned,
+    reason,
+    owns(sessionID: string, session: Session) {
+      return (
+        !disposed &&
+        current() &&
+        !controls.has(sessionID) &&
+        !pinned.has(sessionID) &&
+        !!session.agent &&
+        (!session.model ||
+          (owned.get(sessionID)?.agent === session.agent &&
+            owned.get(sessionID)?.model === key(session.model)))
+      );
+    },
+    claim(sessionID: string, agent: string, model: Model) {
+      if (disposed || !current() || controls.has(sessionID) || pinned.has(sessionID)) return false;
+      if (!owned.has(sessionID) && owned.size >= 1024) return false;
+      owned.set(sessionID, { agent, model: key(model) });
+      return true;
+    },
+    async select(sessionID: string, agent: string, model: Model, live: () => boolean) {
+      if (!live()) return false;
+      expected.set(sessionID, key(model));
+      try {
+        await ctx.session.switchModel({
+          sessionID,
+          model: {
+            providerID: model.providerID,
+            id: model.id,
+            ...(model.variant ? { variant: model.variant } : {}),
+          },
+        });
+        if (live()) owned.set(sessionID, { agent, model: key(model) });
+        return true;
+      } catch (error) {
+        expected.delete(sessionID);
+        throw error;
+      }
+    },
     async status(sessionID: string): Promise<{
       sessionID: string;
       mode: "automatic" | "pinned";

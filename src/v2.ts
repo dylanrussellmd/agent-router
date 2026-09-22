@@ -6,6 +6,7 @@ import { createFailover } from "./core/failover.js";
 import { RoutingEntrySchema } from "./core/schema.js";
 import { captureAgents } from "./core/stack-manager.js";
 import { AgentRouterPlugin } from "./plugin.js";
+import { createQuotaFallback } from "./quota-fallback-v2.js";
 import { createQuotaAdmission } from "./quota-v2.js";
 
 const variant = (value: string | null | undefined) =>
@@ -82,6 +83,30 @@ export async function setupV2(ctx: Context) {
   const kinds = new Map<string, string>();
   const ownSelections = new Map<string, string>();
   const quota = createQuotaAdmission(ctx, routes, () => state() === initial);
+  const quotaFallback =
+    quota &&
+    createQuotaFallback(
+      ctx,
+      routes,
+      quota,
+      () => state() === initial,
+      (sessionID, agent, model, messageID) => {
+        const id = messageID ?? turns.get(sessionID)?.id;
+        if (!id) return;
+        const message = {
+          id,
+          agent,
+          model: {
+            providerID: model.providerID,
+            modelID: model.id,
+            variant: variant(model.variant),
+          },
+        };
+        failover.admit(sessionID, message);
+        turns.set(sessionID, message);
+        kinds.set(sessionID, "primary");
+      },
+    );
   if (quota) {
     await ctx.tool.transform((editor) => {
       const input = { type: "object", properties: {}, additionalProperties: false } as const;
@@ -95,6 +120,7 @@ export async function setupV2(ctx: Context) {
           input,
           async execute(_input, context) {
             await quota.control(context.sessionID, action, async () => {
+              quotaFallback?.stop(context.sessionID);
               turns.delete(context.sessionID);
               kinds.delete(context.sessionID);
               await failover.event({
@@ -131,6 +157,17 @@ export async function setupV2(ctx: Context) {
         )
       )
         continue;
+      if (
+        [
+          "session.model.selected",
+          "session.agent.selected",
+          "session.execution.interrupted",
+          "session.deleted",
+          "session.execution.succeeded",
+          "session.execution.failed",
+        ].includes(event.type)
+      )
+        quotaFallback?.stop(sessionID);
       if (!turns.has(sessionID)) continue;
       if (event.type === "session.model.selected") {
         const model = event.data.model;
@@ -160,12 +197,41 @@ export async function setupV2(ctx: Context) {
   })().catch((error) => {
     if (!controller.signal.aborted) console.warn("agent-router event subscription failed", error);
   });
-  await ctx.session.hook("model.request", (event) => {
+  await ctx.session.hook("model.request", async (event) => {
+    quotaFallback?.model(event);
+    if (event.kind === "primary")
+      await quotaFallback?.child(event.sessionID, event.agent, event.model);
     if (turns.has(event.sessionID)) kinds.set(event.sessionID, event.kind);
   });
-  if (quota) await ctx.tool.hook("execute.before", (event) => quota.child(event));
+  if (quota)
+    await ctx.tool.hook("execute.before", async (event) => {
+      const input = event.input as Record<string, unknown> | undefined;
+      const automatic =
+        event.tool === "subagent" &&
+        input &&
+        typeof input === "object" &&
+        !["model", "sessionID", "session_id", "task_id"].some((key) => key in input) &&
+        typeof input.agent === "string";
+      await quota.child(event);
+      if (event.tool === "subagent" && input && typeof input.agent === "string")
+        quotaFallback?.ticket(
+          event.id,
+          event.sessionID,
+          input.agent,
+          typeof input.model === "string" ? input.model : undefined,
+          automatic && typeof input.prompt === "string" ? input.prompt : undefined,
+        );
+    });
+  if (quotaFallback) {
+    await ctx.session.hook("http.request", (event) => quotaFallback.request(event));
+    await ctx.session.hook("http.response", (event) => quotaFallback.response(event));
+    await ctx.session.hook("experimental.ws.handshake", (event) =>
+      quotaFallback.unsupported(event.sessionID),
+    );
+  }
   await ctx.session.hook("prompt", async (event) => {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
+    quotaFallback?.stop(event.sessionID);
     if (state() !== initial) {
       failover.disable();
       turns.clear();
@@ -208,6 +274,7 @@ export async function setupV2(ctx: Context) {
       failover.admit(event.sessionID, message);
       if (!failover.active(event.sessionID)) return;
       turns.set(event.sessionID, message);
+      if (!session.parentID) quotaFallback?.admit(event.sessionID, session.agent, selected);
       return;
     }
     if (!session.agent || !session.model || !routes[session.agent]) return;
@@ -263,6 +330,7 @@ export async function setupV2(ctx: Context) {
     turns.set(event.sessionID, message);
   });
   await ctx.session.hook("retry", async (event) => {
+    if (await quotaFallback?.retry(event)) return;
     const turn = turns.get(event.sessionID);
     if (
       !turn ||
@@ -297,6 +365,7 @@ export async function setupV2(ctx: Context) {
   });
   return async () => {
     controller.abort();
+    quotaFallback?.dispose();
     await quota?.dispose();
     failover.disable();
     turns.clear();

@@ -7,6 +7,14 @@ export default { id: "quota-retry-probe", async setup(ctx) {
   const record = (entry) => appendFile(path.join(root, "observations.jsonl"), JSON.stringify(entry) + "\n");
   const responses = new Map();
   const switched = new Set();
+  if (process.env.ROUTER_PRODUCTION === "1") await ctx.rpc.register({ id: "quota-retry-probe", events: {}, methods: { pin: {
+    input: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
+    output: { type: "object" }, errors: {} } } }, { pin: async ({ sessionID }) => {
+      let tool;
+      const registration = await ctx.tool.transform(editor => { tool = editor.get("router_pin"); });
+      await registration.dispose();
+      return JSON.parse((await tool.execute({}, { sessionID })).content);
+    } });
   await ctx.session.hook("title", event => { event.result = "Synthetic probe"; });
   await ctx.session.hook("http.request", event => {
     event.request.headers.set("x-probe-session", event.sessionID);
@@ -22,10 +30,15 @@ export default { id: "quota-retry-probe", async setup(ctx) {
     const eligible = event.error.type === "provider.quota" &&
       response?.kind === "primary" && response.status >= 400 &&
       event.model.providerID === "primary-fixture" &&
-      session.model.providerID === event.model.providerID && session.model.id === event.model.id &&
+      (process.env.ROUTER_PRODUCTION === "1" || (session.model.providerID === event.model.providerID && session.model.id === event.model.id)) &&
       !switched.has(event.sessionID);
     await record({ type: "retry", sessionID: event.sessionID, model: event.model,
       error: event.error, attempt: event.attempt, originalDecision: event.decision, response, eligible });
+    if (process.env.ROUTER_PRODUCTION === "1") {
+      // Bound native timeout retries in this fixture only, after recording router policy.
+      if (event.error.status === 408) event.decision = { retry: false };
+      return;
+    }
     // Veto native retries too, to bound the negative controls deterministically.
     event.decision = { retry: false };
     if (!eligible) return;

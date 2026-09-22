@@ -1,4 +1,4 @@
-// Explicit, test-only native-host experiment. No production router is loaded.
+// Explicit, test-only native host. ROUTER_PRODUCTION=1 loads the production router.
 // Run: node scripts/probe-quota-retry.mjs [evidence.json]
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -11,8 +11,15 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
 const root = await mkdtemp(path.join(tmpdir(), "quota-retry-"));
+const production = process.env.ROUTER_PRODUCTION === "1";
 const project = path.join(root, "project");
 for (const dir of ["project", "config", "data", "cache", "state"]) await mkdir(path.join(root, dir));
+if (production) {
+  for (const dir of ["agents", "runtime", "stacks"]) await mkdir(path.join(root, dir));
+  const route = { model: "primary-fixture/primary", fallbacks: [{ model: "backup-fixture/backup" }] };
+  for (const agent of ["build", "general"]) await writeFile(path.join(root, `agents/${agent}.md`), "---\nmodel: primary-fixture/primary\npermissions: []\n---\nSynthetic agent\n");
+  await writeFile(path.join(root, "runtime/state.json"), JSON.stringify({ version: 1, active: "fixture", previousActive: null, lastSwitchedAt: "fixture", fallbackAgents: { build: route, general: route } }));
+}
 const requests = [];
 let scenario;
 let releaseResponse;
@@ -37,17 +44,22 @@ const endpoint = createServer(async (req, res) => {
   requests.push({ sessionID, kind: req.headers["x-probe-kind"], model: body.model, messages: body.messages });
   if (scenario === "compaction" && !previous)
     return stream(res, body.model, { content: "Synthetic pre-compaction completion" });
-  if (scenario === "manual" || scenario === "cancel") {
+  if (["manual", "manual-same", "cancel", "pin"].includes(scenario)) {
     requestArrived();
     await new Promise(resolve => { releaseResponse = resolve; });
   }
   if (body.model === "parent") {
     if (!previous) return tool(res, body.model, "subagent", { agent: "general", description: "Synthetic quota test",
-      prompt: "Run synthetic counter task", model: "primary-fixture/primary" });
+      prompt: "Run synthetic counter task", ...(production && scenario !== "child-explicit" ? {} : { model: "primary-fixture/primary" }) });
     return stream(res, body.model, { content: "Parent completed once" });
   }
   if (body.model === "primary" && scenario.includes("tool") && !previous)
     return tool(res, body.model, "probe_increment", {});
+  if (body.model === "backup" && scenario === "backup503") {
+    res.writeHead(503, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: { message: "Synthetic backup unavailable", type: "server_error" } }));
+    return;
+  }
   if (body.model === "backup" && scenario !== "exhaustion")
     return stream(res, body.model, { content: "Backup completed" });
   if (scenario === "partial") {
@@ -67,7 +79,8 @@ const provider = models => ({ env: ["FIXTURE_TOKEN"], package: "@opencode/ai/pro
   settings: { baseURL: `http://127.0.0.1:${endpoint.address().port}/v1`, apiKey: "synthetic-only" },
   models: Object.fromEntries(models.map(id => [id, { name: id }])) });
 await writeFile(path.join(project, "opencode.json"), JSON.stringify({
-  plugins: [fileURLToPath(new URL("./fixtures/quota-retry", import.meta.url))],
+  plugins: [...(production ? [{ package: fileURLToPath(new URL("..", import.meta.url)), options: { quotaFallback: { enabled: true, allowPaidFallbacks: true }, quotaPreflight: { enabled: process.env.ROUTER_PREFLIGHT === "1" } } }] : []), fileURLToPath(new URL("./fixtures/quota-retry", import.meta.url))],
+  agents: { general: { model: "primary-fixture/primary" } },
   model: "primary-fixture/primary", enabled_providers: ["primary-fixture", "backup-fixture"],
   providers: { "primary-fixture": provider(["primary", "parent", "manual"]), "backup-fixture": provider(["backup"]) },
 }));
@@ -76,6 +89,7 @@ const socket = createServer(); socket.listen(0, "127.0.0.1"); await once(socket,
 const port = socket.address().port; await new Promise(resolve => socket.close(resolve));
 const server = spawn(process.env.OPENCODE_TEST_BINARY ?? "opencode", ["serve", "--hostname", "127.0.0.1", "--port", String(port)], {
   cwd: project, env: { PATH: process.env.PATH, LANG: "C.UTF-8", HOME: root, FIXTURE_TOKEN: "synthetic-only",
+    ...(production ? { ROUTER_PRODUCTION: "1", AGENT_ROUTER_HOME: path.join(root, "runtime"), AGENT_ROUTER_AGENTS_DIR: path.join(root, "agents"), AGENT_ROUTER_STACKS_DIR: path.join(root, "stacks") } : {}),
     XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"),
     XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state") }, stdio: ["ignore", "pipe", "pipe"],
 });
@@ -109,19 +123,20 @@ try {
     if (i === 99) throw new Error("Probe did not activate");
     await delay(100);
   }
-  for (scenario of ["first", "main-tool", "child-first", "child-tool", "exhaustion", "partial", "auth", "timeout", "manual", "cancel", "compaction", "later-veto"]) {
+  for (scenario of ["first", "main-tool", "child-first", "child-tool", "exhaustion", "partial", "auth", "timeout", "manual", "cancel", "compaction", "later-veto", ...(production ? ["explicit-first", "child-explicit", "manual-same", "pin", "backup503"] : [])]) {
     await writeFile(path.join(root, "scenario"), scenario);
     await writeFile(path.join(root, "counter"), "0");
     const start = requests.length;
     const session = await request("/api/session", { location: { directory: project }, title: "Synthetic probe", agent: "build",
-      model: { providerID: "primary-fixture", id: scenario.startsWith("child-") ? "parent" : "primary" } });
+      ...(!production || scenario.startsWith("child-") || scenario === "explicit-first" ? { model: { providerID: "primary-fixture", id: scenario.startsWith("child-") ? "parent" : "primary" } } : {}) });
     const arrived = new Promise(resolve => { requestArrived = resolve; });
     await request(`/api/session/${session.id}/prompt`, { text: "Run synthetic test once" });
-    if (scenario === "manual" || scenario === "cancel") {
+    if (["manual", "manual-same", "cancel", "pin"].includes(scenario)) {
       await Promise.race([arrived, delay(10_000, undefined, { ref: false }).then(() => { throw new Error("No request at control barrier"); })]);
-      if (scenario === "manual") await request(`/api/session/${session.id}/model`, {
-        model: { providerID: "primary-fixture", id: "manual" },
+      if (scenario === "manual" || scenario === "manual-same") await request(`/api/session/${session.id}/model`, {
+        model: { providerID: "primary-fixture", id: scenario === "manual" ? "manual" : "primary" },
       });
+      else if (scenario === "pin") await request("/api/rpc/quota-retry-probe/pin", { input: { sessionID: session.id } });
       else await request(`/api/session/${session.id}/interrupt`, { continue: false });
       releaseResponse();
     }
@@ -144,6 +159,9 @@ try {
       exhaustion: ["primary", "backup"], partial: ["primary"], auth: ["primary"], timeout: ["primary"],
       manual: ["primary"], cancel: ["primary"],
       compaction: ["primary", "primary"], "later-veto": ["primary"],
+      "explicit-first": ["primary"], "child-explicit": ["parent", "primary", "parent"],
+      "manual-same": ["primary"], pin: ["primary"],
+      backup503: ["primary", "backup"],
     }[scenario];
     const summary = { scenario, sessionID: session.id, counter,
       requests: rows.map(r => ({ sessionID: r.sessionID, kind: r.kind, model: r.model,
@@ -162,7 +180,7 @@ try {
       assert.equal(completed.length, 1);
       assert.equal(completed[0].model.providerID, "backup-fixture");
       assert.equal(target.info.model.providerID, "backup-fixture");
-      assert.ok(observations.some(o => o.eligible && o.error.type === "provider.quota" && o.originalDecision.retry === false));
+      assert.ok(observations.some(o => o.eligible && o.error.type === "provider.quota" && o.originalDecision.retry === production));
     }
     if (scenario.includes("tool")) {
       const calls = target.context.flatMap(m => m.content ?? []).filter(c => c.name === "probe_increment");
@@ -172,7 +190,7 @@ try {
       assert.equal(backup.sessionID, target.info.id);
       assert.ok(backup.messages.some(m => m.role === "tool" && m.content === "durable-counter=1"));
     }
-    if (scenario.startsWith("child-")) {
+    if (scenario.startsWith("child-") && scenario !== "child-explicit") {
       assert.equal(sessions.length, 2);
       assert.equal(target.info.parentID, session.id);
       const calls = sessions[0].context.flatMap(m => m.content ?? []).filter(c => c.name === "subagent");
@@ -186,13 +204,17 @@ try {
       assert.equal(observations.filter(o => o.type === "retry").length, 2);
       assert.equal(target.context.at(-1).outcome, "failed");
     }
+    if (scenario === "backup503") {
+      assert.equal(target.context.at(-1).outcome, "failed");
+      assert.ok(observations.some(o => o.error?.status === 503 && !o.originalDecision.retry));
+    }
     if (scenario === "partial") {
       assert.ok(target.context.some(m => m.content?.some(c => c.text === "Partial output")));
       assert.ok(observations.some(o => o.error.type === "provider.quota" && !o.eligible && o.response.status === 200));
     }
     if (scenario === "manual") assert.equal(target.info.model.id, "manual");
     if (scenario === "compaction") {
-      assert.equal(target.info.model.id, "primary");
+      assert.equal(target.info.model?.id, production ? undefined : "primary");
       assert.ok(observations.some(o => o.error?.type === "provider.quota" && o.response?.kind === "compaction" && !o.eligible));
     }
     if (scenario === "later-veto") {

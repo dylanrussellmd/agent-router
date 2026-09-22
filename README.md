@@ -231,13 +231,13 @@ the configured primary. Retry hooks and same-turn retry behavior are unchanged.
   selection events guard asynchronous admission, but the host offers no atomic
   compare-and-switch.
 
-**Explicit session controls:** with preflight enabled, the server exposes three
+**Explicit session controls:** with preflight or quota fallback enabled, the server exposes three
 additional tools. Pin/auto tools are for explicit user requests, under the host's
 normal tool-permission policy. They take no model or session arguments; their
 scope is the calling session.
 
 - `router_pin` freezes the current selection, resolving the native agent/default
-  model when no selection is stored. It disables quota preflight and clears staged
+  model when no selection is stored. It disables quota preflight and same-turn quota fallback, and clears staged
   reactive fallback for this session. The pin persists in server plugin storage.
   Pins share one durable value capped at 1,024 sessions across restarts. Serialized
   writes prevent lost updates; session deletion removes its durable pin, including
@@ -271,6 +271,80 @@ account approvals belong in usage-tracker's `options.quotaBindings`, whose recor
 use `{ providerID, source, models, connection: { type, id }, approval }` for saved
 credentials (`{ type: "env", name }` for environment connections). Router options
 do not contain credentials or binding attestations.
+
+### Opt-in same-turn quota fallback (phase 2, native 2.0.8)
+
+Configure this separately from `quotaPreflight` in the server plugin's `options`:
+
+```json
+{
+  "quotaFallback": {
+    "enabled": true,
+    "allowPaidFallbacks": true,
+    "maxSwitches": 8
+  }
+}
+```
+
+Both booleans default to **false**. Phase 2 requires explicit paid-fallback approval
+before switching, including when quota-service bindings exist. `maxSwitches` is an
+integer from 1 to 8 (default 8); only later entries in the configured chain are
+eligible. Each explicit main-session admission and each newly admitted automatic
+child gets its own budget, shared by all tool continuations in that turn. There is
+no wraparound. Confirmed, fresh, account-scoped exhausted backups are skipped;
+unknown or unavailable quota-service evidence does not block an approved backup.
+
+The router requests a **native same-session retry** only for a structured
+`provider.quota` failure with matching HTTP 402/429 rejection evidence. It never
+submits another prompt, starts a replacement child, or retries a partial stream.
+Authentication, timeouts, generic rate limits, 5xx, WebSockets, auxiliary requests,
+and unsupported endpoints are ineligible. Existing reactive next-turn handling
+continues to apply to its qualifying non-quota errors. Disabling phase 2 preserves
+the previous retry policy.
+
+Correlation is deliberately conservative: exact request-object identity,
+agent/model/variant and admission generation, configured base URL plus a recognized
+`/chat/completions`, `/responses`, or `/messages` operation, no URL credentials or
+query, single-use evidence, and a five-second monotonic expiry. Observations are
+bounded to 1,024 sessions and periodically pruned; no response bodies are read.
+Concurrent observations and any auxiliary traffic poison the admission, including
+an auxiliary HTTP 200 that may still be streaming. Capacity exhaustion fails closed.
+Expiry removes retry permission but retains an unresolved/ambiguous-request
+tombstone until the admission ends or a new admission replaces it. Quota RPC
+candidates contain only provider/model IDs; configured variants remain attached
+to the eventual model selection.
+
+Explicit main model selections, original child model overrides, and resumed child
+tasks are not claimed merely because their models match a chain. Automatic child
+ownership requires a fresh admission ticket, a unique running parent tool call,
+matching parent/agent/model, and a matching digest of the native child's initial
+user message. Parent tool metadata is checked when available. Tickets expire after
+five seconds; ambiguous concurrent child admissions are skipped. Neither prompt
+text nor response bodies are retained in this correlation state.
+Native metadata binding the child to a different parent call vetoes fingerprint
+matching. Ticket overflow disables new automatic child claims until plugin reload,
+including claims already awaiting host reads; dropping negative evidence cannot
+make a child eligible.
+
+**Accepted host limits:** native 2.0.8 retry hooks lack request ID, request kind,
+output-started, cancellation, and atomic switch-and-retry fields. Correlation and
+observable manual/cancel guards are therefore best effort, not transactional
+guarantees. Same-model picker no-ops remain unobservable; use `router_pin`.
+A later retry-hook veto can leave the backup selected without dispatching it.
+The router does not roll back that selection, which could overwrite a newer user
+choice. Status/log reasons distinguish
+`quota_fallback_selected_retry_requested_not_confirmed` from
+`quota_fallback_attempt_dispatched`; the latter observes the HTTP request hook,
+not provider acceptance or successful completion.
+
+After building, `npm run test:quota-fallback` runs the production router in a
+disposable native 2.0.8 host with synthetic local providers. Set
+`ROUTER_PREFLIGHT=1` to exercise both opt-ins together. The fixture verifies first
+quota rejection, main/child post-tool continuation with a durable counter of one,
+chain exhaustion, partial stream, explicit selections, manual/cancel/pin gates,
+compaction, attribution, and the accepted later-veto residual selection. Its
+timeout control vetoes native timeout retries only after recording router policy.
+No real inference or credentials are used.
 
 ### Install This Checkout
 

@@ -1,3 +1,10 @@
+# 2.2.0
+
+- Add separately opt-in, explicitly paid-approved native same-session quota fallback for automatic main turns and positively correlated new child admissions.
+- Require single-use, short-lived HTTP rejection evidence and structured quota errors; preserve pin/manual/cancel guards, chain bounds, native model attribution, and completed tool history.
+- Report selected-versus-dispatched state and document best-effort correlation plus the accepted non-atomic late-veto residual selection.
+- Add production-router native synthetic quota fallback checks and conservative correlation/control tests, including strict quota RPC projection, unresolved-request expiry, and child-ticket capacity guards.
+
 # 2.1.2
 
 - Remove selection-source labels from agent headings; show only the agent name.

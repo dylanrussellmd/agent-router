@@ -9,9 +9,31 @@ node scripts/probe-quota-retry.mjs /absolute/path/to/evidence.json
 `OPENCODE_TEST_BINARY` selects the binary; `TMPDIR` selects disposable storage.
 The optional output defaults to a JSON file alongside the disposable directory.
 The host's disposable HOME/config/state/cache are removed after the run.
-Only this fixture plugin is loaded. The production router is not loaded or edited.
+By default only this fixture plugin is loaded. The production router is not edited.
 Both configured providers point to a loopback synthetic SSE endpoint; the child
 process receives an allowlisted environment and synthetic credentials only.
+
+## Production-router mode
+
+Build first, then run `ROUTER_PRODUCTION=1 node scripts/probe-quota-retry.mjs
+/tmp/opencode/router-phase2.json` (or `npm run test:quota-fallback`). This loads the
+compiled production router before the fixture, with `quotaFallback.enabled` and
+`allowPaidFallbacks` explicitly enabled in the disposable configuration. Set
+`ROUTER_PREFLIGHT=1` to enable phase 1 alongside phase 2.
+
+The fixture records production decisions rather than selecting fallback models.
+Only HTTP 408 retries are vetoed to bound that negative control, after recording
+the production decision; the later-veto scenario still deliberately vetoes quota
+recovery. Main sessions start without explicit model overrides and automatic child
+calls omit their model argument. Additional controls exercise original explicit
+main/child selections, pinning, same-effective-model manual selection, and a
+backup 503 using the existing reactive policy. Both post-tool cases assert the
+counter stays one and native model attribution changes to the backup.
+
+The experiment-only policy and limits below describe the default mode. Production
+correlation limits, budgets, child provenance, and status reasons are documented
+in the repository README's phase-2 section. The native non-atomic late-veto limit
+applies to both modes.
 
 ## Assertions
 
