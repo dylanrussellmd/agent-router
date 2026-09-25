@@ -257,7 +257,7 @@ standard picker does **not** pin it. Explicitly request `router_pin` to freeze i
 request `router_auto` when ready to resume automatic routing. Different-model
 picker selections remain observable and take priority.
 
-`npm run build && npm run test:quota` exercises the production router and a fake
+`npm run bundle && npm run test:quota` exercises the production router and a fake
 quota RPC on a private native OpenCode 2.x host, including true native child starts,
 fresh/exhausted/unknown/reset evidence, explicit pin/auto controls, staged 429/503
 precedence, timeout, recovery, and tool continuation without midtask switching.
@@ -379,7 +379,7 @@ drift is caught instead of silently claimed.
 
 ### Install This Checkout
 
-To test a local V2 checkout, run `npm run typecheck`, `npm test`, and `npm run build` (a fresh checkout uses `pnpm install --frozen-lockfile`). Replace the registry entry in the server `opencode.json` **plugins** array with the package directory:
+To test a local V2 checkout, run `npm run typecheck`, `npm test`, and `npm run bundle` (a fresh checkout uses `pnpm install --frozen-lockfile`). Replace the registry entry in the server `opencode.json` **plugins** array with the package directory:
 
 ```json
 "file:///absolute/path/to/agent-router"
@@ -389,7 +389,12 @@ Use the same package directory in `cli.json` **plugins** when explicitly registe
 
 Supported OpenCode 2.x hosts resolve local directories through the literal root
 `index.ts` and `tui.ts` wrappers; published packages use their exports. Run
-`npm run build` before using the source directory.
+`npm run bundle` before using the source directory.
+
+The GitHub plugin entry uses the committed `dist/` bundles so OpenCode can
+install the Git dependency without a nested preparation install. After changing
+runtime source, run `npm run bundle` and include updated `dist/` files in the
+same commit.
 
 `npm run test:integration` starts an isolated supported OpenCode 2.x server,
 initializes its location, verifies router activation and terminal discovery, and

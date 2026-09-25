@@ -41,8 +41,7 @@
     "url": "git+https://github.com/dylanrussellmd/agent-router.git"
   },
   "scripts": {
-    "build": "tsup",
-    "prepare": "npm run build",
+    "bundle": "tsup",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src tests",
     "lint:fix": "biome check --write src tests",
@@ -54,10 +53,10 @@
     "test:integration": "node scripts/smoke-v2.mjs",
     "test:quota": "node scripts/smoke-quota-v2.mjs",
     "test:quota-fallback": "ROUTER_PRODUCTION=1 node scripts/probe-quota-retry.mjs",
-    "test:compat": "npm run typecheck && npm run build && npm test && npm run test:integration && npm run test:quota && npm run test:quota-fallback",
+    "test:compat": "npm run typecheck && npm run bundle && npm test && npm run test:integration && npm run test:quota && npm run test:quota-fallback",
     "test:watch": "vitest",
     "version": "node scripts/sync-version.mjs && git add src/version.ts",
-    "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run test"
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run bundle && npm test"
   },
   "peerDependencies": {
     "@opencode/plugin": "^2.0.8"
