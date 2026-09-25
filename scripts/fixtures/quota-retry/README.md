@@ -1,6 +1,6 @@
 # Native quota retry experiment (test only)
 
-Run from the repository root with an installed **OpenCode 2.0.8** binary:
+Run from the repository root with an installed **OpenCode 2.x** binary (minimum 2.0.8):
 
 ```sh
 node scripts/probe-quota-retry.mjs /absolute/path/to/evidence.json
@@ -30,6 +30,19 @@ main/child selections, pinning, same-effective-model manual selection, and a
 backup 503 using the existing reactive policy. Both post-tool cases assert the
 counter stays one and native model attribution changes to the backup.
 
+`ROUTER_PROXY_ORDER=before` or `after` also loads the test-only transport adapter
+in `../quota-retry-proxy` on the corresponding side of the production router.
+It replaces the outgoing Request and endpoint, attaching the original-request
+symbol contract. Run both orders; they must still pass every scenario, including
+the real native title-generation cases. `ROUTER_PROXY_UNMARKED=1` runs a dedicated
+negative control: the same rewrite without provenance must not select a backup.
+`ROUTER_SCENARIOS=title-overlap,title-quota` optionally limits a run to named cases.
+
+The title cases omit the preset title and use the **same model** for title and
+primary requests. A two-request barrier forces overlap. A successful title must
+not block primary quota fallback; a title-only quota rejection must not switch
+the successful primary. The fixture does not override either routing decision.
+
 The experiment-only policy and limits below describe the default mode. Production
 correlation limits, budgets, child provenance, and status reasons are documented
 in the repository README's phase-2 section. The native non-atomic late-veto limit
@@ -47,6 +60,10 @@ applies to both modes.
 - Backup quota exhaustion stops after two total requests.
 - Streamed text followed by an SSE quota error does not switch models.
 - Authentication and HTTP 408 errors do not switch models.
+- Concurrent native title generation does not consume or overwrite primary quota
+  evidence; title-only quota failure does not select a backup.
+- Tagged transport rewrites preserve correlation in both hook orders; untagged
+  replacements remain rejected.
 - Explicit manual selection before the pending quota response is released wins.
 - Interrupt before releasing the pending quota response results in no backup request.
 - Explicit native compaction quota is rejected by the HTTP request-kind gate;
@@ -86,7 +103,8 @@ logs/authentication are omitted. Failed assertions exit nonzero.
 - The one-switch budget is in-memory and per session, not durable or per turn.
   Background child completion delivery, crash/restart recovery, multiple backup
   candidates, and concurrent prompts are unverified.
-- Only the installed 2.0.8 native host is executed. Source equality of relevant
-  2.0.12 files is not a native-host 2.0.12 test.
+- The script accepts supported OpenCode 2.x host versions (minimum 2.0.8). Run it
+  once per host binary in a compatibility matrix; a pass on one 2.x release does
+  not certify an untested future release.
 
 This fixture is deliberately opt-in and is not a deployable routing plugin.

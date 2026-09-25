@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { UsageQuota } from "../../src/core/quota-preflight.js";
 import { createQuotaFallback } from "../../src/quota-fallback-v2.js";
 import { createQuotaAdmission } from "../../src/quota-v2.js";
+import { ORIGINAL_REQUEST, attachOriginalRequest } from "../../src/request-provenance.js";
 
 const primary = { providerID: "fixture", id: "primary" };
 const backup = { providerID: "fixture", id: "backup", variant: "high" };
@@ -517,4 +518,251 @@ describe("opt-in quota fallback", () => {
       expect(f.admission.owns("child", session)).toBe(mode === "automatic");
     },
   );
+  describe("request provenance cooperation with rewriting adapters", () => {
+    type FixtureShape = Awaited<ReturnType<typeof fixture>>;
+    const nativeUrl = "https://fixture.test/v1/chat/completions";
+    /** Layered replacements over one original; returns the outermost wrapper. */
+    function chain(depth: number, root = new Request(nativeUrl)) {
+      let current = root;
+      for (let i = 0; i < depth; i++) {
+        const wrapper = new Request(nativeUrl);
+        attachOriginalRequest(wrapper, current);
+        current = wrapper;
+      }
+      return current;
+    }
+    /**
+     * Drive request()/response() with distinct Request identities per hook,
+     * as a rewriting adapter placed before or after the router would see.
+     */
+    function provenance(
+      f: FixtureShape,
+      options: {
+        native?: Request;
+        request?: (native: Request) => Request;
+        response?: (native: Request) => Request;
+        status?: number;
+      } = {},
+    ) {
+      const native = options.native ?? new Request(nativeUrl);
+      const base = f.model();
+      f.fallback.request({ ...base, request: options.request ? options.request(native) : native });
+      const response = new Response("SECRET_BODY_MUST_NOT_BE_READ", {
+        status: options.status ?? 429,
+      });
+      vi.spyOn(response, "text").mockImplementation(() => {
+        throw new Error("body read");
+      });
+      vi.spyOn(response, "json").mockImplementation(() => {
+        throw new Error("body read");
+      });
+      const responded = options.response ? options.response(native) : native;
+      f.fallback.response({ ...base, request: responded, response });
+      return { ...base, request: native, response };
+    }
+    it("correlates a marked replacement in both hooks (adapter before router)", async () => {
+      const f = await fixture();
+      provenance(f, {
+        request: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+        response: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+      });
+      const event = f.retry();
+      expect(await f.fallback.retry(event)).toBe(true);
+      expect(event.decision).toEqual({ retry: true, delay: 0 });
+      expect(f.ctx.session.switchModel).toHaveBeenCalledWith({ sessionID: "s", model: backup });
+    });
+    it("correlates when response carries the original after the request was rewritten", async () => {
+      const f = await fixture();
+      provenance(f, {
+        request: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+        response: (native) => native,
+      });
+      expect(await f.fallback.retry(f.retry())).toBe(true);
+      expect(f.ctx.session.switchModel).toHaveBeenCalledWith({ sessionID: "s", model: backup });
+    });
+    it("correlates when the router saw the original and the response carries a replacement", async () => {
+      const f = await fixture();
+      provenance(f, {
+        request: (native) => native,
+        response: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+      });
+      expect(await f.fallback.retry(f.retry())).toBe(true);
+      expect(f.ctx.session.switchModel).toHaveBeenCalledWith({ sessionID: "s", model: backup });
+    });
+    it("validates the resolved original endpoint, never the replacement URL", async () => {
+      const f = await fixture();
+      // Root is a wrong endpoint even though the replacement looks native.
+      provenance(f, {
+        native: new Request("https://other.test/v1/chat/completions"),
+        request: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+        response: (native) => attachOriginalRequest(new Request(nativeUrl), native),
+      });
+      expect(await f.fallback.retry(f.retry())).toBe(false);
+      expect(f.ctx.session.switchModel).not.toHaveBeenCalled();
+    });
+    it("approves a native root regardless of the adapter's gateway URL", async () => {
+      const f = await fixture();
+      // The adapter rewrites to a private gateway; the resolved original is native.
+      provenance(f, {
+        request: (native) =>
+          attachOriginalRequest(new Request("https://gateway.test/v1/chat/completions"), native),
+        response: (native) =>
+          attachOriginalRequest(new Request("https://gateway.test/v1/chat/completions"), native),
+      });
+      expect(await f.fallback.retry(f.retry())).toBe(true);
+      expect(f.ctx.session.switchModel).toHaveBeenCalledWith({ sessionID: "s", model: backup });
+    });
+    it("rejects a response marked with an unrelated original identity", async () => {
+      const f = await fixture();
+      const base = f.model();
+      const native = new Request(nativeUrl);
+      f.fallback.request({ ...base, request: native });
+      // A different, never-observed original backs the response's replacement.
+      const unrelated = new Request(nativeUrl);
+      const replacement = attachOriginalRequest(new Request(nativeUrl), unrelated);
+      const response = new Response("SECRET_BODY_MUST_NOT_BE_READ", { status: 429 });
+      vi.spyOn(response, "text").mockImplementation(() => {
+        throw new Error("body read");
+      });
+      vi.spyOn(response, "json").mockImplementation(() => {
+        throw new Error("body read");
+      });
+      f.fallback.response({ ...base, request: replacement, response });
+      expect(await f.fallback.retry(f.retry())).toBe(false);
+      expect(f.ctx.session.switchModel).not.toHaveBeenCalled();
+    });
+    it("rejects malformed provenance (accessor marker) without invoking it", async () => {
+      const f = await fixture();
+      const base = f.model();
+      const replacement = new Request(nativeUrl);
+      Object.defineProperty(replacement, ORIGINAL_REQUEST, {
+        get: () => {
+          throw new Error("getter must not run");
+        },
+        enumerable: false,
+        configurable: false,
+      });
+      f.fallback.request({ ...base, request: replacement });
+      provenance(f, {});
+      expect(await f.fallback.retry(f.retry())).toBe(false);
+      expect(f.ctx.session.switchModel).not.toHaveBeenCalled();
+    });
+    it("resolves bounded chains and rejects overflow end to end", async () => {
+      const f = await fixture();
+      const native = new Request(nativeUrl);
+      provenance(f, { native, request: () => chain(8, native) });
+      expect(await f.fallback.retry(f.retry())).toBe(true);
+      expect(f.ctx.session.switchModel).toHaveBeenCalledWith({ sessionID: "s", model: backup });
+      // A fresh generated admission, then a chain one hop past the bound.
+      f.fallback.admit("s", "build", primary);
+      const overflow = chain(9);
+      f.fallback.request({ ...f.model(), request: overflow });
+      expect(await f.fallback.retry(f.retry())).toBe(false);
+      expect(f.ctx.session.switchModel).toHaveBeenCalledTimes(1);
+    });
+    it("rejects malformed response provenance without invoking an accessor", async () => {
+      const f = await fixture();
+      const base = f.model();
+      const native = new Request(nativeUrl);
+      f.fallback.request({ ...base, request: native });
+      const replacement = new Request(nativeUrl);
+      const getter = vi.fn(() => native);
+      Object.defineProperty(replacement, ORIGINAL_REQUEST, { get: getter });
+      f.fallback.response({
+        ...base,
+        request: replacement,
+        response: new Response(null, { status: 429 }),
+      });
+      expect(await f.fallback.retry(f.retry())).toBe(false);
+      expect(getter).not.toHaveBeenCalled();
+      expect(f.ctx.session.switchModel).not.toHaveBeenCalled();
+    });
+  });
+});
+
+describe("bounded quota-fallback diagnostics", () => {
+  it("records a successful correlated primary 429 through model switch and retry request", async () => {
+    const f = await fixture();
+    f.http(429);
+    const event = f.retry();
+
+    expect(await f.fallback.retry(event)).toBe(true);
+    const trace = f.fallback.diagnostics("s").attempts.at(-1);
+    expect(trace).toBeDefined();
+    expect(trace?.events.map((item) => item.event)).toEqual(
+      expect.arrayContaining([
+        "turn.admitted",
+        "model.request",
+        "http.request",
+        "http.response",
+        "retry.received",
+        "retry.eligible",
+        "fallback.candidate_selected",
+        "fallback.selected",
+      ]),
+    );
+    expect(trace?.events.find((item) => item.event === "http.response")).toMatchObject({
+      matched: true,
+      status: 429,
+      observedStatus: 429,
+    });
+    expect(trace?.events.find((item) => item.event === "fallback.selected")).toMatchObject({
+      providerID: backup.providerID,
+      model: backup.id,
+      retryRequested: true,
+      finalRetryDecision: true,
+    });
+    const serialized = JSON.stringify(trace);
+    expect(serialized).not.toContain("SECRET_BODY_MUST_NOT_BE_READ");
+    expect(serialized).not.toContain("SECRET_ERROR");
+  });
+
+  it("records a missing primary HTTP response without consuming an uncorrelated fallback", async () => {
+    const f = await fixture();
+    f.model();
+
+    expect(await f.fallback.retry(f.retry())).toBe(false);
+    expect(f.ctx.session.switchModel).not.toHaveBeenCalled();
+    expect(
+      f.fallback
+        .diagnostics("s")
+        .attempts.at(-1)
+        ?.events.find((item) => item.event === "retry.rejected"),
+    ).toMatchObject({
+      reason: "http_response_not_seen",
+      errorType: "provider.quota",
+      errorStatus: 429,
+      observedStatus: null,
+    });
+  });
+
+  it("identifies an ambiguous original endpoint and retains bounded history across stop", async () => {
+    const f = await fixture();
+    const base = f.model();
+    const request = new Request("https://other.test/v1/chat/completions");
+    f.fallback.request({ ...base, request });
+    f.fallback.response({ ...base, request, response: new Response(null, { status: 429 }) });
+    expect(await f.fallback.retry(f.retry())).toBe(false);
+
+    const rejected = f.fallback
+      .diagnostics("s")
+      .attempts.at(-1)
+      ?.events.find((item) => item.event === "retry.rejected");
+    expect(rejected).toMatchObject({ reason: "primary_request_observation_ambiguous" });
+
+    for (let index = 0; index < 6; index++) {
+      f.fallback.begin("s", `trace-${index}`);
+      f.fallback.admissionSkipped("s", "synthetic_test", { index });
+      f.fallback.stop("s");
+    }
+    const attempts = f.fallback.diagnostics("s").attempts;
+    expect(attempts).toHaveLength(4);
+    expect(attempts.map((attempt) => attempt.id)).toEqual([
+      "trace-2",
+      "trace-3",
+      "trace-4",
+      "trace-5",
+    ]);
+    expect(attempts[0]?.events.some((item) => item.event === "admission.skipped")).toBe(true);
+  });
 });

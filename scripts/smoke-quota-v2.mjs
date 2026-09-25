@@ -1,4 +1,4 @@
-// Real private OpenCode 2.0.8 + production router + synthetic usage-query service.
+// Real private OpenCode 2.x + production router + synthetic usage-query service.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { assertSupportedOpenCodeVersion } from "./lib/opencode-version.mjs";
 
 const source = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const usageSource = process.env.USAGE_TRACKER_SOURCE;
@@ -19,6 +20,7 @@ const agentBytes = "---\nmodel: fixture/primary\npermissions: []\n---\nSynthetic
 for (const agent of ["build", "general"]) await writeFile(path.join(root, `agents/${agent}.md`), agentBytes);
 const stateBytes = JSON.stringify({ version: 1, active: "fixture", previousActive: null, lastSwitchedAt: "fixture", fallbackAgents: { build: route, general: route } });
 await writeFile(path.join(root, "runtime/state.json"), stateBytes);
+await writeFile(path.join(root, "stacks/fixture.json"), JSON.stringify({ agents: { build: route, general: route } }));
 const requests = [];
 let scenario;
 function stream(res, model, delta, finish = "stop") {
@@ -154,7 +156,7 @@ try {
     const text = await response.text(); const result = text ? JSON.parse(text) : null;
     assert.ok(response.ok, `${url}: ${JSON.stringify(result)}`); return result?.data ?? result;
   };
-  assert.equal((await request("/api/info")).version, "2.0.8");
+  const hostVersion = assertSupportedOpenCodeVersion((await request("/api/info")).version);
   await request("/api/location");
   for (let i = 0; i < 100; i++) {
     const plugins = await request("/api/plugin");
@@ -169,6 +171,15 @@ try {
   };
   const create = async (model) => request("/api/session", { location: { directory: path.join(root, "project") }, title: scenario, agent: "build", ...(model ? { model: { providerID: "fixture", id: model } } : {}) });
   const control = async (session, action) => (await request("/api/rpc/quota-acceptance/control", { input: { sessionID: session.id, action } })).output;
+  const routingStatus = async sessionID => (await request("/api/rpc/agent-router/status", { input: { sessionID } })).output;
+  assert.equal(await routingStatus("ses_missing"), null);
+  const foreign = await request("/api/session", { location: { directory: root }, title: "Foreign location fixture" });
+  assert.equal(await routingStatus(foreign.id), null, "Other-location session must fail closed");
+  const badInput = await fetch(`http://127.0.0.1:${port}/api/rpc/agent-router/status`, { method: "POST", headers: {
+    Authorization: `Basic ${Buffer.from(`opencode:${password}`).toString("base64")}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ input: { sessionID: "../invalid" } }) });
+  assert.notEqual(badInput.status, 500, "Explicit input schema avoids native omission 500");
+  assert.ok(!badInput.ok || (await badInput.json()).error, "Invalid ID must fail validation");
   for (const [mode, expected] of [["available", "primary"], ["unknown", "primary"], ["exhausted", "backup"], ["stale", "primary"], ["reset", "primary"], ["error", "primary"], ["timeout", "primary"]]) {
     scenario = mode;
     await writeFile(path.join(root, "quota"), mode);
@@ -177,6 +188,24 @@ try {
     await prompt(session);
     if (mode === "timeout") assert.ok(Date.now() - start < 5000, "Quota deadline bounded at 3 seconds plus host overhead");
     assert.deepEqual(requests.filter(r => r.sessionID === session.id).map(r => r.model), [expected], mode);
+    const beforeStatus = await readFile(path.join(root, "observations.jsonl"), "utf8");
+    const count = requests.length;
+    const status = await routingStatus(session.id);
+    assert.equal(status.mode, "automatic");
+    assert.deepEqual(await routingStatus(session.id), status, "Polling cannot invent observation times");
+    assert.equal(requests.length, count, "Status never invokes inference");
+    assert.equal(await readFile(path.join(root, "observations.jsonl"), "utf8"), beforeStatus, "Status never queries quota or switches models");
+    if (["error", "timeout"].includes(mode)) assert.equal(status.checkedAt, null);
+    else assert.ok(status.checkedAt > 0 && status.checkedAt <= Date.now(), JSON.stringify({ mode, status }));
+    if (process.env.ROUTER_PTY_EVIDENCE && mode === "exhausted") {
+      const capture = spawn("python", [fileURLToPath(new URL("./capture-status-pty.py", import.meta.url)), path.join(root, "project"), `http://127.0.0.1:${port}`, session.id, "preflight-exhausted", process.env.ROUTER_PTY_EVIDENCE], {
+        env: { PATH: process.env.PATH, HOME: root, LANG: "C.UTF-8", OPENCODE_SERVER_PASSWORD: password, ...(process.env.PYTHONPATH ? { PYTHONPATH: process.env.PYTHONPATH } : {}),
+          XDG_CONFIG_HOME: path.join(root, "config"), XDG_DATA_HOME: path.join(root, "data"), XDG_CACHE_HOME: path.join(root, "cache"), XDG_STATE_HOME: path.join(root, "state"),
+          AGENT_ROUTER_HOME: path.join(root, "runtime"), AGENT_ROUTER_AGENTS_DIR: path.join(root, "agents"), AGENT_ROUTER_STACKS_DIR: path.join(root, "stacks"),
+          OPENCODE_CLI_CONFIG_CONTENT: JSON.stringify({ plugins: [source] }) }, stdio: "inherit",
+      });
+      assert.equal((await once(capture, "exit"))[0], 0, "PTY capture failed");
+    }
   }
   scenario = "recovery";
   await writeFile(path.join(root, "quota"), "exhausted");
@@ -263,7 +292,7 @@ try {
   assert.ok(observations.some(o => o.type === "query"), "Native cross-plugin query executed");
   for (const agent of ["build", "general"]) assert.equal(await readFile(path.join(root, `agents/${agent}.md`), "utf8"), agentBytes);
   assert.equal(await readFile(path.join(root, "runtime/state.json"), "utf8"), stateBytes);
-  console.log("PASS: native quota RPC; main/true-child admissions; durable pin/next-turn auto controls; 429/503 staged precedence; timeout; recovery; no midtask switching; files intact");
+  console.log(`PASS: OpenCode ${hostVersion} native quota RPC; main/true-child admissions; durable pin/next-turn auto controls; 429/503 staged precedence; timeout; recovery; no midtask switching; files intact`);
   if (usageSource) console.log("PASS: actual usage-tracker RPC definition and quota implementation with synthetic direct-provider responses");
 } finally {
   endpoint.closeAllConnections(); await new Promise(resolve => endpoint.close(resolve));

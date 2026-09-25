@@ -1,4 +1,4 @@
-// Discovery-only native 2.0.8 admission probe. Synthetic credentials; private host.
+// Discovery-only native OpenCode 2.x admission probe. Synthetic credentials; private host.
 // Does not load the router or change the same-turn retry experiment.
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -8,6 +8,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { assertSupportedOpenCodeVersion } from "./lib/opencode-version.mjs";
 
 const root = await mkdtemp(path.join(tmpdir(), "router-admission-"));
 for (const dir of ["project", "probe", "config", "data", "cache", "state"])
@@ -105,7 +106,7 @@ try {
     assert.ok(response.ok, `${url}: ${JSON.stringify(result)}`);
     return result?.data ?? result;
   };
-  assert.equal((await request("/api/info")).version, "2.0.8");
+  const version = assertSupportedOpenCodeVersion((await request("/api/info")).version);
   await request("/api/location");
   for (let i = 0; i < 100; i++) {
     const plugins = await request("/api/plugin");
@@ -140,7 +141,7 @@ try {
     assert.equal(sent.length, 1, `${name}: exactly one child request`);
     assert.equal(sent[0].model, ["switch-child", "before-child"].includes(name) ? "backup" : "primary");
   }
-  const evidence = { version: "2.0.8", sessions, observations, requests };
+  const evidence = { version, sessions, observations, requests };
   if (process.argv[2]) await writeFile(process.argv[2], JSON.stringify(evidence, null, 2) + "\n");
   console.log(JSON.stringify(evidence, null, 2));
 } finally {

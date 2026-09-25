@@ -12,10 +12,12 @@
 
 import type { Context } from "@opencode/plugin/tui/context";
 import { resolvePathsWithConfig } from "../core/config.js";
+import { RoutingStatusOutput, RoutingStatusRpc } from "../routing-status.js";
 import {
   type DialogDeps,
   canOpenDialogs,
   openBackConfirm,
+  openRoutingMode,
   openStackEditor,
   openStackSwitcher,
   openStackViewer,
@@ -23,11 +25,11 @@ import {
 } from "./dialogs.js";
 import type { RouterTuiApi, TuiCommandEntry } from "./host.js";
 import { type SolidRuntime, materialize } from "./render.js";
+import { createRoutingPoller } from "./routing-poller.js";
 import { createSidebarPoller, readStackSnapshot } from "./store.js";
 import { type RoutingStatus, buildSidebarNodes } from "./view.js";
 
 const POLL_INTERVAL_MS = 1500;
-const ROUTING_INTERVAL_MS = 3000;
 const SIDEBAR_ORDER = 850;
 
 /**
@@ -68,6 +70,15 @@ function buildCommands(api: RouterTuiApi, deps: DialogDeps, status: () => void):
       onSelect: status,
     },
   ];
+  if (canOpenDialogs(api) && api.currentSessionID && api.readRouting && api.controlRouting)
+    commands.push({
+      title: "agent-router: session routing",
+      value: "agent-router.routing",
+      description: "View or switch this session between automatic and pinned routing",
+      category: "agent-router",
+      slash: { name: "agent-routing" },
+      onSelect: () => openRoutingMode(api),
+    });
   if (!canOpenDialogs(api)) return commands;
   commands.push(
     {
@@ -124,18 +135,13 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
 
   let snapshot = await readStackSnapshot(paths);
   const bootActive = snapshot.active;
-  // Cached routing status of the viewed session; refreshed by a separate
-  // poller so render stays synchronous. Undefined = no status source.
-  let routing: RoutingStatus | undefined;
-  let routingSessionID: string | undefined;
-  let lastSessionID: string | undefined;
   const viewContext = (sessionID?: string) => ({
     bootActive,
     theme: api.theme?.current,
     current: sessionID ? api.currentModel?.(sessionID) : undefined,
     live: sessionID ? api.liveSelections?.(sessionID) : undefined,
     defaults: api.configuredModels?.(),
-    routing: sessionID === routingSessionID ? routing : undefined,
+    routing: sessionID ? api.currentRouting?.(sessionID) : undefined,
   });
 
   try {
@@ -143,7 +149,6 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
       order: SIDEBAR_ORDER,
       slots: {
         sidebar_content: (sessionID) => {
-          if (sessionID) lastSessionID = sessionID;
           return materialize(buildSidebarNodes(snapshot, viewContext(sessionID)), solid);
         },
       },
@@ -183,29 +188,6 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
     },
   });
 
-  const stopRouting = api.routingStatus
-    ? createSidebarPoller<{
-        routing: RoutingStatus | undefined;
-        sessionID: string | undefined;
-        key: string;
-      }>({
-        read: async () => {
-          const sessionID = lastSessionID;
-          const status = sessionID
-            ? await api.routingStatus?.(sessionID).catch(() => undefined)
-            : undefined;
-          return { routing: status, sessionID, key: JSON.stringify([sessionID, status ?? null]) };
-        },
-        intervalMs: ROUTING_INTERVAL_MS,
-        initial: { routing: undefined, sessionID: undefined, key: "boot" },
-        onChange: (next) => {
-          routing = next.routing;
-          routingSessionID = next.sessionID;
-          api.renderer.requestRender();
-        },
-      })
-    : undefined;
-
   const deps: DialogDeps = { api, paths, refresh };
   const status = () =>
     api.ui.toast({
@@ -222,7 +204,6 @@ export const tui = async (api: RouterTuiApi): Promise<void> => {
   }
 
   api.lifecycle.onDispose(stopPolling);
-  if (stopRouting) api.lifecycle.onDispose(stopRouting);
   debugLog(`tui() init complete — active=${snapshot.active ?? "(none)"}`);
 };
 
@@ -232,9 +213,35 @@ const agentRouterTui = {
     const solid = await importHostSolid();
     if (!solid) return;
     const cleanups: Array<() => void | Promise<void>> = [];
+    const { createEffect, onCleanup } = await import("solid-js");
+    let statusSession: string | undefined;
+    let statusValue: RoutingStatus | undefined;
+    let targetLocation = ctx.location;
+    let targetClient = ctx.client;
+    let targetKey = "";
+    let statusOwner: object | undefined;
     const [revision, updateRevision] = ctx.storage.memory("sidebar-revision", {
       initial: { value: 0 },
     });
+    const statusPoller = createRoutingPoller<RoutingStatus>({
+      read: async (sessionID, signal) => {
+        const location = targetLocation ?? ctx.data.location.default();
+        const value = await targetClient
+          .rpc(RoutingStatusRpc)
+          .status({ sessionID }, { location, signal });
+        const parsed = RoutingStatusOutput.safeParse(value);
+        return parsed.success && parsed.data.sessionID === sessionID ? parsed.data : undefined;
+      },
+      publish: (id, value) => {
+        statusSession = id;
+        statusValue = value;
+        updateRevision((draft) => {
+          draft.value++;
+        });
+        ctx.renderer.requestRender();
+      },
+    });
+    cleanups.push(() => statusPoller.dispose());
     const api: RouterTuiApi = {
       slots: {
         register: ({ slots }) => {
@@ -243,6 +250,32 @@ const agentRouterTui = {
               ctx.ui.slot({
                 append: "sidebar.content",
                 render: (input) => {
+                  const owner = {};
+                  createEffect(() => {
+                    const route = ctx.ui.router.current();
+                    if (route.type !== "session" || route.sessionID !== input.sessionID) {
+                      if (statusOwner === owner) {
+                        statusOwner = undefined;
+                        statusPoller.select(undefined);
+                      }
+                      return;
+                    }
+                    statusOwner = owner;
+                    const location = ctx.location ?? ctx.data.location.default();
+                    const key = JSON.stringify(location);
+                    if (key !== targetKey || targetClient !== ctx.client)
+                      statusPoller.select(undefined);
+                    targetKey = key;
+                    targetLocation = location;
+                    targetClient = ctx.client;
+                    statusPoller.select(input.sessionID);
+                  });
+                  onCleanup(() => {
+                    if (statusOwner === owner) {
+                      statusOwner = undefined;
+                      statusPoller.select(undefined);
+                    }
+                  });
                   const node = solid.createElement("box");
                   solid.setProp(node, "flexDirection", "column");
                   solid.insert(node, () => {
@@ -308,7 +341,7 @@ const agentRouterTui = {
             ctx.ui.slot({
               append: "app",
               render: () => {
-                // 2.0.8's Keymap.Provider is available only under a mounted UI owner.
+                // Keymap.Provider is available only under a mounted UI owner.
                 ctx.keymap.layer(() => ({
                   mode: "global",
                   commands: build().map((command) => ({
@@ -333,6 +366,25 @@ const agentRouterTui = {
           ),
       },
       lifecycle: { onDispose: (cleanup) => cleanups.push(cleanup) },
+      currentRouting: (id) => (id === statusSession ? statusValue : undefined),
+      currentSessionID: () => {
+        const route = ctx.ui.router.current();
+        return route.type === "session" ? route.sessionID : undefined;
+      },
+      readRouting: async (sessionID) => {
+        const location = targetLocation ?? ctx.data.location.default();
+        const value = await targetClient.rpc(RoutingStatusRpc).status({ sessionID }, { location });
+        const parsed = RoutingStatusOutput.safeParse(value);
+        return parsed.success && parsed.data.sessionID === sessionID ? parsed.data : undefined;
+      },
+      controlRouting: async (sessionID, action) => {
+        const location = targetLocation ?? ctx.data.location.default();
+        const value = await targetClient
+          .rpc(RoutingStatusRpc)
+          .control({ sessionID, action }, { location });
+        const parsed = RoutingStatusOutput.safeParse(value);
+        return parsed.success && parsed.data.sessionID === sessionID ? parsed.data : undefined;
+      },
       theme: {
         get current() {
           return {

@@ -8,8 +8,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { assertSupportedOpenCodeVersion } from "./lib/opencode-version.mjs";
 
-// Runs a real, private 2.0.8 host. Never reads or edits the user's config/state.
+// Runs a real, private OpenCode 2.x host. Never reads or edits user config/state.
 const source = path.resolve(fileURLToPath(new URL("..", import.meta.url)));
 const packagePath = process.env.AGENT_ROUTER_TEST_PACKAGE ?? source;
 const root = await mkdtemp(path.join(tmpdir(), "agent-router-host-"));
@@ -169,8 +170,8 @@ try {
     const text = await response.text();
     return { status: response.status, body: text ? JSON.parse(text) : null };
   };
-  assert.equal((await request("/api/info")).body.version, "2.0.8");
-  // Location initialization is required before reading plugin status in 2.0.8.
+  const hostVersion = assertSupportedOpenCodeVersion((await request("/api/info")).body.version);
+  // Initialize location before reading plugin status.
   assert.equal((await request("/api/location")).status, 200);
   let plugins = [];
   let router;
@@ -219,7 +220,7 @@ try {
     "Invalid input must not execute the handler",
   );
   console.log(
-    "PASS: real OpenCode 2.0.8 local package activation and RPC absent/null/invalid-input checks",
+    `PASS: real OpenCode ${hostVersion} local package activation and RPC absent/null/invalid-input checks`,
   );
   const checked = async (url, body) => {
     const result = await request(url, body);

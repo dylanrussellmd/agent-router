@@ -8,11 +8,17 @@ import { captureAgents } from "./core/stack-manager.js";
 import { AgentRouterPlugin } from "./plugin.js";
 import { createQuotaFallback } from "./quota-fallback-v2.js";
 import { createQuotaAdmission } from "./quota-v2.js";
+import {
+  RoutingControlInput,
+  RoutingStatusRpc,
+  createRoutingStatusReader,
+  sameRoutingLocation,
+} from "./routing-status.js";
 
 const variant = (value: string | null | undefined) =>
   value === "default" ? undefined : (value ?? undefined);
 
-/** 2.0.8: model refs are readonly in context hooks; switch only at user admission. */
+/** OpenCode 2.x model refs are readonly in context hooks; switch only at user admission. */
 export async function setupV2(ctx: Context) {
   const legacy = await AgentRouterPlugin(
     { client: {} } as Parameters<typeof AgentRouterPlugin>[0],
@@ -107,6 +113,35 @@ export async function setupV2(ctx: Context) {
         kinds.set(sessionID, "primary");
       },
     );
+  const readStatus = createRoutingStatusReader(ctx, quota);
+  const applyRoutingControl = async (sessionID: string, action: "pin" | "auto") => {
+    if (!quota) throw new Error("Quota-aware routing is not enabled.");
+    await quota.control(sessionID, action, async () => {
+      quotaFallback?.stop(sessionID);
+      turns.delete(sessionID);
+      kinds.delete(sessionID);
+      await failover.event({
+        event: {
+          type: "session.next.model.switched",
+          properties: { sessionID },
+        },
+      });
+    });
+  };
+  const statusRegistration = await ctx.rpc.register(RoutingStatusRpc, {
+    status: (input, context) => readStatus(input, context.signal),
+    control: async (input, context) => {
+      const parsed = RoutingControlInput.safeParse(input);
+      if (!parsed.success || context.signal?.aborted || !quota) return null;
+      const session = await ctx.session.get(
+        { sessionID: parsed.data.sessionID },
+        context.signal ? { signal: context.signal } : {},
+      );
+      if (context.signal?.aborted || !sameRoutingLocation(session, ctx.location)) return null;
+      await applyRoutingControl(parsed.data.sessionID, parsed.data.action);
+      return readStatus({ sessionID: parsed.data.sessionID }, context.signal);
+    },
+  });
   if (quota) {
     await ctx.tool.transform((editor) => {
       const input = { type: "object", properties: {}, additionalProperties: false } as const;
@@ -119,18 +154,8 @@ export async function setupV2(ctx: Context) {
               : "Only on an explicit user request: resume quota-aware routing for this session on its NEXT explicit user turn. Does not send a prompt or switch immediately.",
           input,
           async execute(_input, context) {
-            await quota.control(context.sessionID, action, async () => {
-              quotaFallback?.stop(context.sessionID);
-              turns.delete(context.sessionID);
-              kinds.delete(context.sessionID);
-              await failover.event({
-                event: {
-                  type: "session.next.model.switched",
-                  properties: { sessionID: context.sessionID },
-                },
-              });
-            });
-            return { content: JSON.stringify(await quota.status(context.sessionID)) };
+            await applyRoutingControl(context.sessionID, action);
+            return { content: JSON.stringify(await readStatus({ sessionID: context.sessionID })) };
           },
         });
       editor.add({
@@ -139,14 +164,26 @@ export async function setupV2(ctx: Context) {
           "Show this session's automatic/pinned routing mode, current model, and routing reason.",
         input,
         async execute(_input, context) {
-          return { content: JSON.stringify(await quota.status(context.sessionID)) };
+          return { content: JSON.stringify(await readStatus({ sessionID: context.sessionID })) };
         },
       });
+      if (quotaFallback)
+        editor.add({
+          name: "router_quota_diagnostics",
+          description:
+            "Show this session's recent bounded quota-fallback trace. Contains routing metadata only; never prompts, bodies, headers, or credentials.",
+          input,
+          async execute(_input, context) {
+            return { content: JSON.stringify(quotaFallback.diagnostics(context.sessionID)) };
+          },
+        });
     });
   }
   const controller = new AbortController();
   const events = (async () => {
     for await (const event of ctx.event.subscribe({ signal: controller.signal })) {
+      if (event.type.startsWith("integration.") || event.type.startsWith("connection."))
+        quota?.clearFreshness();
       if (!("sessionID" in event.data)) continue;
       const sessionID = String(event.data.sessionID);
       if (
@@ -226,13 +263,15 @@ export async function setupV2(ctx: Context) {
     await ctx.session.hook("http.request", (event) => quotaFallback.request(event));
     await ctx.session.hook("http.response", (event) => quotaFallback.response(event));
     await ctx.session.hook("experimental.ws.handshake", (event) =>
-      quotaFallback.unsupported(event.sessionID),
+      quotaFallback.unsupported(event.sessionID, event),
     );
   }
   await ctx.session.hook("prompt", async (event) => {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
     quotaFallback?.stop(event.sessionID);
+    quotaFallback?.begin(event.sessionID, event.messageID);
     if (state() !== initial) {
+      quotaFallback?.admissionSkipped(event.sessionID, "configuration_changed_before_admission");
       failover.disable();
       turns.clear();
       return;
@@ -241,6 +280,10 @@ export async function setupV2(ctx: Context) {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
     if (quota) {
       if (session.parentID && (await quota.isPinned(event.sessionID))) {
+        quotaFallback?.admissionSkipped(event.sessionID, "child_session_pinned", {
+          agent: session.agent ?? null,
+          hasParent: true,
+        });
         turns.delete(event.sessionID);
         return;
       }
@@ -259,6 +302,21 @@ export async function setupV2(ctx: Context) {
               : undefined,
           );
       if (!selected || !session.agent || !routes[session.agent]) {
+        quotaFallback?.admissionSkipped(
+          event.sessionID,
+          !session.agent || !routes[session.agent]
+            ? "session_agent_has_no_configured_route"
+            : "quota_admission_returned_no_model",
+          {
+            agent: session.agent ?? null,
+            sessionModelProviderID: session.model?.providerID ?? null,
+            sessionModelID: session.model?.id ?? null,
+            sessionModelVariant: session.model?.variant ?? null,
+            routeConfigured: !!session.agent && !!routes[session.agent],
+            hasParent: !!session.parentID,
+            modelSelectedByAdmission: !!selected,
+          },
+        );
         turns.delete(event.sessionID);
         return;
       }
@@ -272,7 +330,15 @@ export async function setupV2(ctx: Context) {
         },
       };
       failover.admit(event.sessionID, message);
-      if (!failover.active(event.sessionID)) return;
+      if (!failover.active(event.sessionID)) {
+        quotaFallback?.admissionSkipped(event.sessionID, "reactive_failover_admission_inactive", {
+          agent: session.agent,
+          providerID: selected.providerID,
+          modelID: selected.id,
+          hasParent: !!session.parentID,
+        });
+        return;
+      }
       turns.set(event.sessionID, message);
       if (!session.parentID) quotaFallback?.admit(event.sessionID, session.agent, selected);
       return;
@@ -365,6 +431,7 @@ export async function setupV2(ctx: Context) {
   });
   return async () => {
     controller.abort();
+    await statusRegistration.dispose();
     quotaFallback?.dispose();
     await quota?.dispose();
     failover.disable();

@@ -6,6 +6,7 @@ export default { id: "quota-retry-probe", async setup(ctx) {
   const root = process.env.HOME;
   const record = (entry) => appendFile(path.join(root, "observations.jsonl"), JSON.stringify(entry) + "\n");
   const responses = new Map();
+  const key = event => JSON.stringify([event.sessionID, event.agent, event.model]);
   const switched = new Set();
   if (process.env.ROUTER_PRODUCTION === "1") await ctx.rpc.register({ id: "quota-retry-probe", events: {}, methods: { pin: {
     input: { type: "object", properties: { sessionID: { type: "string" } }, required: ["sessionID"], additionalProperties: false },
@@ -15,27 +16,33 @@ export default { id: "quota-retry-probe", async setup(ctx) {
       await registration.dispose();
       return JSON.parse((await tool.execute({}, { sessionID })).content);
     } });
-  await ctx.session.hook("title", event => { event.result = "Synthetic probe"; });
+  // Preset native titles everywhere except the production title-overlap/title-quota
+  // scenarios, where real native title generation must reach the synthetic endpoint.
+  await ctx.session.hook("title", async event => {
+    const scenario = await readFile(path.join(root, "scenario"), "utf8").catch(() => "");
+    if (scenario !== "title-overlap" && scenario !== "title-quota") event.result = "Synthetic probe";
+  });
   await ctx.session.hook("http.request", event => {
     event.request.headers.set("x-probe-session", event.sessionID);
     event.request.headers.set("x-probe-kind", event.kind);
-    responses.delete(event.sessionID);
+    event.request.headers.set("x-probe-agent", event.agent);
+    responses.delete(key(event));
   });
   await ctx.session.hook("http.response", event => {
-    responses.set(event.sessionID, { status: event.response.status, kind: event.kind });
+    responses.set(key(event), { status: event.response.status, kind: event.kind });
   });
   await ctx.session.hook("retry", async event => {
-    const response = responses.get(event.sessionID);
+    const response = responses.get(key(event));
     const session = await ctx.session.get({ sessionID: event.sessionID });
     const eligible = event.error.type === "provider.quota" &&
       response?.kind === "primary" && response.status >= 400 &&
       event.model.providerID === "primary-fixture" &&
       (process.env.ROUTER_PRODUCTION === "1" || (session.model.providerID === event.model.providerID && session.model.id === event.model.id)) &&
       !switched.has(event.sessionID);
-    await record({ type: "retry", sessionID: event.sessionID, model: event.model,
+    await record({ type: "retry", sessionID: event.sessionID, agent: event.agent, model: event.model,
       error: event.error, attempt: event.attempt, originalDecision: event.decision, response, eligible });
     if (process.env.ROUTER_PRODUCTION === "1") {
-      // Bound native timeout retries in this fixture only, after recording router policy.
+      // Bound native timeout retries only, after recording the router policy.
       if (event.error.status === 408) event.decision = { retry: false };
       return;
     }

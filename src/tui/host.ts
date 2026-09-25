@@ -71,13 +71,18 @@ export interface RouterTuiApi {
   readonly theme?: { readonly current?: Record<string, unknown> };
   readonly state?: { readonly provider?: unknown };
   readonly currentModel?: (sessionID: string) => import("./view.js").SidebarContext["current"];
+  readonly currentRouting?: (sessionID: string) => import("./view.js").RoutingStatus | undefined;
+  readonly currentSessionID?: () => string | undefined;
+  readonly readRouting?: (
+    sessionID: string,
+  ) => Promise<import("./view.js").RoutingStatus | undefined>;
+  readonly controlRouting?: (
+    sessionID: string,
+    action: "pin" | "auto",
+  ) => Promise<import("./view.js").RoutingStatus | undefined>;
   readonly configuredModels?: () => readonly import("./view.js").LiveSelection[];
   /** Running direct-child selections at the viewed parent's location; retain conflicts. */
   readonly liveSelections?:
     | ((sessionID: string) => readonly import("./view.js").LiveSelection[])
-    | undefined;
-  /** Read-only routing-status query; undefined means no status source is available. */
-  readonly routingStatus?:
-    | ((sessionID: string) => Promise<import("./view.js").RoutingStatus | undefined>)
     | undefined;
 }

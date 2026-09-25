@@ -2,6 +2,7 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import { createPinStore } from "./core/pin-store.js";
 import {
   QuotaOptions,
+  type QuotaResult,
   UsageQuota,
   chooseQuotaRoute,
   createQuotaQuery,
@@ -10,6 +11,7 @@ import {
 } from "./core/quota-preflight.js";
 import type { RoutingEntry } from "./core/schema.js";
 import { QuotaFallbackOptions } from "./quota-fallback-v2.js";
+import { RoutingReason, RoutingStatusOutput } from "./routing-status.js";
 
 type Model = { providerID: string; id: string; variant?: string | undefined };
 type Session = {
@@ -43,6 +45,7 @@ export function createQuotaAdmission(
   const deletedControls = new Set<string>();
   const pinStore = createPinStore(ctx.storage);
   const reasons = new Map<string, string>();
+  const freshness = new Map<string, { checkedAt: number | null; validUntil: number | null }>();
   let disposed = false;
 
   const invalidate = (sessionID: string) => {
@@ -63,7 +66,26 @@ export function createQuotaAdmission(
     }
   };
 
-  const evaluate = async (route: RoutingEntry, pending?: Model) => {
+  const observe = (sessionID: string, candidate: Model, results: readonly QuotaResult[]) => {
+    if (disposed || (!freshness.has(sessionID) && freshness.size >= 1024)) return;
+    const matches = results.filter(
+      (r) => r.providerID === candidate.providerID && r.id === candidate.id,
+    );
+    const r = matches.length === 1 ? matches[0] : undefined;
+    const checkedAt =
+      r?.accountRef && r.scopeRef && r.checkedAt && r.checkedAt <= Date.now() && r.checkedAt > 0
+        ? r.checkedAt
+        : null;
+    const validUntil =
+      checkedAt && r?.validUntil && r.validUntil > checkedAt
+        ? Math.min(r.validUntil, r.resetAt ?? r.validUntil)
+        : null;
+    freshness.set(sessionID, {
+      checkedAt,
+      validUntil: validUntil && validUntil > 0 ? validUntil : null,
+    });
+  };
+  const evaluate = async (route: RoutingEntry, pending?: Model, sessionID?: string) => {
     const candidates = [route, ...(route.fallbacks ?? [])]
       .map(quotaCandidate)
       .filter(
@@ -75,6 +97,7 @@ export function createQuotaAdmission(
     const results = options.enabled ? await query.read(candidates) : [];
     // Evaluate at the final decision, including after any further host reads.
     return () => {
+      if (sessionID) observe(sessionID, quotaCandidate(route), results);
       const now = Date.now();
       const startIndex = pending
         ? Math.max(
@@ -110,6 +133,8 @@ export function createQuotaAdmission(
   return {
     isPinned,
     reason,
+    observe,
+    clearFreshness: () => freshness.clear(),
     owns(sessionID: string, session: Session) {
       return (
         !disposed &&
@@ -147,16 +172,24 @@ export function createQuotaAdmission(
         throw error;
       }
     },
-    async status(sessionID: string): Promise<{
+    async status(
+      sessionID: string,
+      knownSession?: Session,
+    ): Promise<{
       sessionID: string;
       mode: "automatic" | "pinned";
       model: Model | null;
       reason: string;
+      checkedAt: number | null;
+      validUntil: number | null;
     }> {
-      const session = await ctx.session.get({ sessionID });
+      const session = knownSession ?? (await ctx.session.get({ sessionID }));
       const explicit = await isPinned(sessionID);
       const automatic =
-        !explicit && (!session.model || owned.get(sessionID)?.model === key(session.model));
+        !explicit &&
+        (!session.model ||
+          (owned.get(sessionID)?.agent === session.agent &&
+            owned.get(sessionID)?.model === key(session.model)));
       const resolved =
         session.model ??
         (session.agent
@@ -166,20 +199,25 @@ export function createQuotaAdmission(
       return {
         sessionID,
         mode: automatic ? "automatic" : "pinned",
-        model: resolved
-          ? {
-              providerID: resolved.providerID,
-              id: resolved.id,
-              ...("variant" in resolved && typeof resolved.variant === "string"
-                ? { variant: resolved.variant }
-                : {}),
-            }
-          : null,
+        model:
+          RoutingStatusOutput.shape.model.safeParse(resolved).success && resolved
+            ? {
+                providerID: resolved.providerID,
+                id: resolved.id,
+                ...("variant" in resolved && typeof resolved.variant === "string"
+                  ? { variant: resolved.variant }
+                  : {}),
+              }
+            : null,
+        ...(freshness.get(sessionID) ?? { checkedAt: null, validUntil: null }),
         reason: explicit
           ? "explicit_pin"
-          : automatic
-            ? (reasons.get(sessionID) ?? "awaiting_next_turn")
-            : "manual_or_preexisting_selection",
+          : !current()
+            ? "configuration_changed"
+            : automatic
+              ? (RoutingReason.safeParse(reasons.get(sessionID) ?? "awaiting_next_turn").data ??
+                "unknown")
+              : "manual_or_preexisting_selection",
       };
     },
     async control(sessionID: string, action: "pin" | "auto", pause: () => Promise<void>) {
@@ -262,6 +300,7 @@ export function createQuotaAdmission(
           if (controls.has(sessionID)) deletedControls.add(sessionID);
           pinned.delete(sessionID);
           reasons.delete(sessionID);
+          freshness.delete(sessionID);
           return pinStore.remove(sessionID).then(() => false);
         }
       }
@@ -291,7 +330,7 @@ export function createQuotaAdmission(
         )
           return;
         if (!owned.has(sessionID) && owned.size >= 1024) return;
-        const choose = await evaluate(route, pending);
+        const choose = await evaluate(route, pending, sessionID);
         if (disposed || !current() || (versions.get(sessionID) ?? 0) !== generation) return;
         const latest = await ctx.session.get({ sessionID });
         if (
@@ -380,6 +419,7 @@ export function createQuotaAdmission(
       controls.clear();
       pinned.clear();
       reasons.clear();
+      freshness.clear();
       await pinStore.drain();
     },
   };

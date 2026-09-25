@@ -17,6 +17,7 @@ import {
 } from "../core/stack-manager.js";
 import { readState } from "../core/state.js";
 import { validateStack } from "../core/validator.js";
+import { routingReasons } from "../routing-status.js";
 import {
   type ModelTarget,
   applyModelEdit,
@@ -25,6 +26,7 @@ import {
   targetLabel,
 } from "./actions.js";
 import type { RouterTuiApi, SelectOption } from "./host.js";
+import type { RoutingStatus } from "./view.js";
 
 export interface DialogDeps {
   readonly api: RouterTuiApi;
@@ -42,6 +44,99 @@ function toastError(api: RouterTuiApi, e: unknown): void {
     message: (e as Error).message ?? String(e),
     variant: "error",
   });
+}
+
+function routingSummary(status: RoutingStatus): string {
+  const model = status.model
+    ? `${status.model.providerID}/${status.model.id}${
+        status.model.variant && status.model.variant !== "default"
+          ? ` [${status.model.variant}]`
+          : ""
+      }`
+    : "native model";
+  const reason = status.reason
+    ? (routingReasons[status.reason as keyof typeof routingReasons] ?? "Reason unknown")
+    : "Reason unknown";
+  return `${model} · ${reason}`;
+}
+
+function routingLabel(status: RoutingStatus): string {
+  return status.mode === "automatic" ? "Automatic" : "Pinned";
+}
+
+/** Native TUI flow: query the RPC and change routing directly, without an LLM turn. */
+export function openRoutingMode(api: RouterTuiApi): void {
+  const sessionID = api.currentSessionID?.();
+  const readRouting = api.readRouting;
+  const controlRouting = api.controlRouting;
+  if (!sessionID) {
+    api.ui.toast({
+      title: "agent-router",
+      message: "Open a session before viewing or changing its routing mode.",
+      variant: "warning",
+    });
+    return;
+  }
+  if (!readRouting || !controlRouting || !canOpenDialogs(api)) {
+    api.ui.toast({
+      title: "agent-router",
+      message: "Session routing controls are unavailable in this TUI.",
+      variant: "warning",
+    });
+    return;
+  }
+
+  void readRouting(sessionID)
+    .then((status) => {
+      if (!status) {
+        api.ui.toast({
+          title: "agent-router",
+          message: "Routing status is unavailable for this session.",
+          variant: "warning",
+        });
+        return;
+      }
+      const options: SelectOption[] = (["automatic", "pinned"] as const).map((mode) => ({
+        title: mode === "automatic" ? "Automatic" : "Pinned",
+        value: mode,
+        description:
+          mode === status.mode
+            ? `Current · ${routingSummary(status)}`
+            : mode === "automatic"
+              ? "Resume automatic routing on the next explicit user turn"
+              : "Freeze the current model for this session",
+        onSelect: () => {
+          api.ui.dialog?.clear();
+          if (mode === status.mode) {
+            api.ui.toast({
+              title: "agent-router",
+              message: `${routingLabel(status)} · ${routingSummary(status)}`,
+              variant: "info",
+            });
+            return;
+          }
+          void controlRouting(sessionID, mode === "automatic" ? "auto" : "pin")
+            .then((next) => {
+              if (!next) throw new Error("The router did not return a routing status.");
+              api.ui.toast({
+                title: "agent-router",
+                message:
+                  next.mode === "automatic"
+                    ? `Automatic routing resumes on the next user turn · ${routingSummary(next)}`
+                    : `Pinned · ${routingSummary(next)}`,
+                variant: "success",
+              });
+            })
+            .catch((error) => toastError(api, error));
+        },
+      }));
+      openSelect(api, {
+        title: `Session routing · ${routingLabel(status)}`,
+        options,
+        current: status.mode,
+      });
+    })
+    .catch((error) => toastError(api, error));
 }
 
 function openSelect(

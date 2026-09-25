@@ -27,7 +27,7 @@ export default defineConfig({
   // Only host-provided modules stay external: @opencode-ai/plugin (peer dep,
   // resolved by the opencode plugin loader) and @opentui/solid (provided by
   // the opencode TUI runtime).
-  external: ["@opencode/plugin", "@opentui/solid"],
+  external: ["@opencode/plugin", "@opentui/solid", "solid-js"],
   noExternal: ["zod", "cac"],
   async onSuccess() {
     // Add shebang + executable bit to dist/cli.js so the bin works.

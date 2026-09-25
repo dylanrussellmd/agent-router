@@ -1,3 +1,10 @@
+# Unreleased
+
+- Add a native `/agent-routing` TUI command to inspect and change the current session's Automatic/Pinned mode without an LLM turn; scope its control RPC to the serving project location.
+- Preserve quota-fallback request correlation across trusted transport rewrites using bounded, in-process original-request provenance; unmarked replacements remain ineligible.
+- Isolate auxiliary requests with distinct agent/model identities so title generation cannot overwrite primary quota evidence. Same-identity overlaps still fail closed.
+- Declare OpenCode 2.x API peer support from 2.0.8, compile against 2.0.14 types, and add CI coverage for the minimum, current, and latest 2.x hosts.
+
 # 2.2.0
 
 - Add separately opt-in, explicitly paid-approved native same-session quota fallback for automatic main turns and positively correlated new child admissions.

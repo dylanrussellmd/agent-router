@@ -1,0 +1,41 @@
+name: OpenCode compatibility
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 7 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        # `2` resolves to the newest published 2.x CLI, catching later minor/patch releases.
+        opencode-version: ["2.0.8", "2.0.14", "2"]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.30.3
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Match SDK types to OpenCode ${{ matrix.opencode-version }}
+        run: pnpm add --save-dev --save-exact "@opencode/plugin@${{ matrix.opencode-version }}"
+      - name: Install OpenCode ${{ matrix.opencode-version }}
+        shell: bash
+        run: |
+          npm install --global "@opencode/cli@${{ matrix.opencode-version }}"
+          opencode --version
+          echo "OPENCODE_TEST_BINARY=$(command -v opencode)" >> "$GITHUB_ENV"
+      - name: Build and run unit plus native-host compatibility tests
+        run: npm run test:compat

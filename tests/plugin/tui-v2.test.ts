@@ -12,6 +12,7 @@ vi.mock("@opentui/solid", () => ({
     node[key] = value;
   },
 }));
+vi.mock("solid-js", () => ({ createEffect: (fn: () => void) => fn(), onCleanup: vi.fn() }));
 
 it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", async () => {
   const root = mkdtempSync(path.join(tmpdir(), "ar-tui-v2-"));
@@ -47,8 +48,25 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
     return unregister;
   });
   let mounted = false;
-  const select = vi.fn(async () => undefined);
+  let nextSelection: string | undefined;
+  const select = vi.fn(async () => nextSelection);
   const toast = vi.fn();
+  const routingStatus = {
+    sessionID: "ses_test",
+    mode: "pinned" as const,
+    model: { providerID: "test", id: "backup" },
+    reason: "manual_or_preexisting_selection" as const,
+    checkedAt: null,
+    validUntil: null,
+  };
+  const readRouting = vi.fn(async () => routingStatus);
+  const controlRouting = vi.fn(async ({ action }: { action: "pin" | "auto" }) => ({
+    ...routingStatus,
+    mode: action === "auto" ? ("automatic" as const) : ("pinned" as const),
+    reason:
+      action === "auto" ? ("automatic_next_explicit_turn" as const) : ("explicit_pin" as const),
+  }));
+  const rpc = vi.fn(() => ({ status: readRouting, control: controlRouting }));
   const revision = { value: 0 };
   let session = {
     id: "session",
@@ -100,7 +118,10 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
       },
     },
   };
+  let route: { type: "home" } | { type: "session"; sessionID: string } = { type: "home" };
   const ctx = {
+    location: { directory: "/project" },
+    client: { rpc },
     theme,
     storage: {
       memory: () => [revision, (update: (draft: typeof revision) => void) => update(revision)],
@@ -115,7 +136,12 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
       },
       location: { model: { list: () => [{ providerID: "test", id: "model" }] } },
     },
-    ui: { slot, toast: { show: toast }, dialog: { select, confirm: vi.fn(), clear: vi.fn() } },
+    ui: {
+      router: { current: () => route },
+      slot,
+      toast: { show: toast },
+      dialog: { select, confirm: vi.fn(), clear: vi.fn() },
+    },
     keymap: {
       layer: (build: () => { commands: typeof commands }) => {
         if (!mounted) throw new Error("Keymap.Provider is missing");
@@ -202,6 +228,7 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
       expect(ctx.data.session.get).toHaveBeenCalledWith("session");
       expect(commands.map((command) => command.slash.name)).toEqual([
         "agent-status",
+        "agent-routing",
         "agent-switch",
         "agent-view",
         "agent-edit",
@@ -212,6 +239,19 @@ it("registers the V2 sidebar, slash commands, selection dialogs and cleanup", as
       expect(toast).toHaveBeenCalledWith(
         expect.objectContaining({ message: expect.stringContaining("sample") }),
       );
+      route = { type: "session", sessionID: "ses_test" };
+      nextSelection = "automatic";
+      commands.find((command) => command.id === "agent-router.routing")?.run();
+      await vi.waitFor(() =>
+        expect(controlRouting).toHaveBeenCalledWith(
+          { sessionID: "ses_test", action: "auto" },
+          { location: ctx.location },
+        ),
+      );
+      expect(toast).toHaveBeenCalledWith(
+        expect.objectContaining({ message: expect.stringContaining("Automatic routing resumes") }),
+      );
+      nextSelection = undefined;
       commands.find((command) => command.id === "agent-router.view")?.run();
       await vi.waitFor(() =>
         expect(select).toHaveBeenCalledWith(expect.objectContaining({ title: "View stack" })),

@@ -12,3 +12,8 @@ declare module "@opentui/solid" {
   export function insert(parent: unknown, child: unknown): unknown;
   export function setProp(node: unknown, name: string, value: unknown): unknown;
 }
+
+declare module "solid-js" {
+  export function createEffect(fn: () => void): void;
+  export function onCleanup(fn: () => void): void;
+}

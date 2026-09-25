@@ -3,6 +3,7 @@
  * `materialize` in render.ts turns these nodes into real opentui elements.
  */
 
+import { routingReasons } from "../routing-status.js";
 import type { ModelAssignment, StackSnapshot } from "./store.js";
 
 export interface ViewNode {
@@ -27,9 +28,18 @@ export interface LiveSelection extends ModelAssignment {
 /** Routing mode of the viewed session, as reported by the status service. */
 export interface RoutingStatus {
   readonly mode: "automatic" | "pinned";
+  readonly model?:
+    | {
+        readonly providerID: string;
+        readonly id: string;
+        readonly variant?: string | undefined;
+      }
+    | null
+    | undefined;
   readonly reason?: string | undefined;
   /** Epoch ms of the last quota evaluation behind the current mode, if tracked. */
   readonly checkedAt?: number | null | undefined;
+  readonly validUntil?: number | null | undefined;
 }
 
 export interface SidebarContext {
@@ -103,13 +113,22 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
   );
   if (ctx.routing) {
     const parts = [`Routing · ${ctx.routing.mode === "pinned" ? "Pinned" : "Automatic"}`];
-    if (ctx.routing.reason) parts.push(ctx.routing.reason);
-    parts.push(
-      ctx.routing.checkedAt != null
-        ? `quota ${quotaAge(ctx.routing.checkedAt)}`
-        : "quota freshness unknown",
-    );
     nodes.push(text(parts.join(" · "), { fg: theme.textMuted }));
+    if (ctx.routing.reason)
+      nodes.push(
+        text(
+          routingReasons[ctx.routing.reason as keyof typeof routingReasons] ?? "Reason unknown",
+          { fg: theme.textMuted },
+        ),
+      );
+    nodes.push(
+      text(
+        ctx.routing.checkedAt != null
+          ? `Last quota ${quotaAge(ctx.routing.checkedAt)} · ${ctx.routing.validUntil && ctx.routing.validUntil > Date.now() ? "unexpired" : "stale"}`
+          : "quota freshness unknown",
+        { fg: theme.textMuted },
+      ),
+    );
   } else {
     nodes.push(text("Routing · unknown · freshness unknown", { fg: theme.textMuted }));
   }
@@ -141,7 +160,7 @@ export function buildSidebarNodes(snapshot: StackSnapshot, ctx: SidebarContext):
         kind: "box",
         props: { flexDirection: "column", marginTop: 1 },
         children: [
-          text(assignment.agent, { fg: theme.text, attributes: TEXT_ATTR_BOLD }),
+          text(assignment.agent, { fg: theme.warning, attributes: 0 }),
           {
             kind: "box",
             props: { flexDirection: "column", paddingLeft: 2 },

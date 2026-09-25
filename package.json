@@ -53,16 +53,17 @@
     "test:integration": "node scripts/smoke-v2.mjs",
     "test:quota": "node scripts/smoke-quota-v2.mjs",
     "test:quota-fallback": "ROUTER_PRODUCTION=1 node scripts/probe-quota-retry.mjs",
+    "test:compat": "npm run typecheck && npm run build && npm test && npm run test:integration && npm run test:quota && npm run test:quota-fallback",
     "test:watch": "vitest",
     "version": "node scripts/sync-version.mjs && git add src/version.ts",
     "prepublishOnly": "npm run lint && npm run typecheck && npm run build && npm run test"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.0.8"
+    "@opencode/plugin": "^2.0.8"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@opencode/plugin": "2.0.8",
+    "@opencode/plugin": "2.0.14",
     "@types/node": "^20.14.0",
     "@vitest/coverage-v8": "^4.1.11",
     "cac": "^6.7.14",

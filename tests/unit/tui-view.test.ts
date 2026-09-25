@@ -301,8 +301,8 @@ describe("buildSidebarNodes", () => {
     const line = nodes[headerIdx + 3];
     expect(line.kind).toBe("box");
     const heading = line.children?.[0];
-    expect(heading?.props.fg).toBe("TEXT");
-    expect(heading?.props.attributes).toBe(1);
+    expect(heading?.props.fg).toBe("ORANGE");
+    expect(heading?.props.attributes).toBe(0);
     expect(line.children?.[1]?.children?.map((node) => node.props.fg)).toEqual(["ORANGE", "MUTED"]);
     expect(nodes.find((n) => n.text?.startsWith("Current Stack ·"))?.props.fg).toBe("TEXT");
   });
@@ -317,9 +317,7 @@ describe("buildSidebarNodes", () => {
       routing: { mode: "automatic", reason: "primary_available" },
     });
     const headerIdx = automatic.findIndex((n) => n.text?.startsWith("Current Stack ·"));
-    expect(automatic[headerIdx + 1].text).toBe(
-      "Routing · Automatic · primary_available · quota freshness unknown",
-    );
+    expect(automatic[headerIdx + 1].text).toBe("Routing · Automatic");
     expect(automatic[headerIdx + 1].props.fg).toBeUndefined();
 
     const pinned = buildSidebarNodes(snap("s", ["s"], agents), {
@@ -328,9 +326,7 @@ describe("buildSidebarNodes", () => {
       routing: { mode: "pinned", reason: "explicit_pin", checkedAt: Date.now() - 30_000 },
     });
     const pinnedHeaderIdx = pinned.findIndex((n) => n.text?.startsWith("Current Stack ·"));
-    expect(pinned[pinnedHeaderIdx + 1].text).toBe(
-      "Routing · Pinned · explicit_pin · quota 30s ago",
-    );
+    expect(pinned[pinnedHeaderIdx + 1].text).toBe("Routing · Pinned");
     expect(pinned[pinnedHeaderIdx + 1].props.fg).toBe("MUTED");
   });
 });

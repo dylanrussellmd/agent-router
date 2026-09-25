@@ -17,7 +17,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-async function fixture(defaultVariant = false) {
+async function fixture(defaultVariant = false, routingControls = false) {
   const root = mkdtempSync(path.join(tmpdir(), "ar-v2-"));
   const agents = path.join(root, "agents");
   mkdirSync(agents);
@@ -50,7 +50,14 @@ async function fixture(defaultVariant = false) {
   vi.spyOn(console, "warn").mockImplementation(() => {});
   const hooks: Record<string, (event: unknown) => Promise<void>> = {};
   const tools: Record<string, TestTool> = {};
+  const rpcMethods: Record<
+    string,
+    (input: unknown, context: { signal?: AbortSignal }) => Promise<unknown>
+  > = {};
+  const storage = new Map<string, unknown>();
   let session = {
+    projectID: "project",
+    location: { directory: root },
     agent: "build",
     model: { providerID: "headroom", id: "deepseek", variant: defaultVariant ? "default" : "high" },
   };
@@ -60,6 +67,18 @@ async function fixture(defaultVariant = false) {
   const queue: unknown[] = [];
   let wake: (() => void) | undefined;
   const ctx = {
+    location: { directory: root, project: { id: "project" } },
+    options: routingControls ? { quotaFallback: { enabled: true, allowPaidFallbacks: true } } : {},
+    storage: {
+      get: vi.fn(async (key: string) => storage.get(key)),
+      set: vi.fn(async (key: string, value: unknown) => storage.set(key, value)),
+    },
+    rpc: {
+      register: vi.fn(async (_definition: unknown, methods: typeof rpcMethods) => {
+        Object.assign(rpcMethods, methods);
+        return { dispose: vi.fn() };
+      }),
+    },
     model: {
       list: async () => ({
         location: { directory: root },
@@ -77,6 +96,7 @@ async function fixture(defaultVariant = false) {
             tools[tool.name] = tool;
           },
         }),
+      hook: vi.fn(async () => {}),
     },
     event: {
       async *subscribe({ signal }: { signal: AbortSignal }) {
@@ -119,6 +139,8 @@ async function fixture(defaultVariant = false) {
   return {
     root,
     tools,
+    rpcMethods,
+    session,
     ctx,
     switchModel,
     prompt,
@@ -137,7 +159,41 @@ async function fixture(defaultVariant = false) {
   };
 }
 
-describe("OpenCode 2.0.8 adapter", () => {
+describe("OpenCode 2.x adapter (minimum 2.0.8)", () => {
+  it("exposes location-scoped TUI controls without prompting or switching models", async () => {
+    const f = await fixture(false, true);
+    try {
+      const status = await f.rpcMethods.status({ sessionID: "ses_test" }, {});
+      expect(status).toMatchObject({ mode: "pinned", reason: "manual_or_preexisting_selection" });
+
+      const automatic = await f.rpcMethods.control({ sessionID: "ses_test", action: "auto" }, {});
+      expect(automatic).toMatchObject({
+        mode: "automatic",
+        reason: "automatic_next_explicit_turn",
+      });
+
+      const pinned = await f.rpcMethods.control({ sessionID: "ses_test", action: "pin" }, {});
+      expect(pinned).toMatchObject({ mode: "pinned", reason: "explicit_pin" });
+      expect(f.switchModel).not.toHaveBeenCalled();
+      expect(f.ctx.session.prompt).not.toHaveBeenCalled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
+  it("rejects TUI routing controls for a session outside the serving location", async () => {
+    const f = await fixture(false, true);
+    try {
+      f.session.location.directory = "/foreign";
+      const result = await f.rpcMethods.control({ sessionID: "ses_foreign", action: "pin" }, {});
+      expect(result).toBeNull();
+      expect(f.ctx.storage.set).not.toHaveBeenCalled();
+      expect(f.switchModel).not.toHaveBeenCalled();
+    } finally {
+      await f.cleanup();
+    }
+  });
+
   it("normalizes the real host's default variant and recognizes its own selection event", async () => {
     const f = await fixture(true);
     try {
