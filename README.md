@@ -509,7 +509,7 @@ git clone https://github.com/dylanrussellmd/agent-router.git
 cd agent-router
 pnpm install
 pnpm test
-pnpm build
+pnpm bundle
 ```
 
 ## License

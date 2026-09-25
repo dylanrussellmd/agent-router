@@ -49,7 +49,7 @@ jobs:
       - name: lint
         run: pnpm lint
       - name: build
-        run: pnpm build
+        run: pnpm bundle
       - name: test
         run: pnpm test
 
