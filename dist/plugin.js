@@ -15898,7 +15898,7 @@ var clock = () => performance.now();
 var CAP = 1024;
 var TRACE_TTL = 30 * 6e4;
 var TRACE_ATTEMPTS = 4;
-var TRACE_EVENTS = 32;
+var TRACE_EVENTS = 64;
 var digest = (text) => createHash("sha256").update(text).digest("hex");
 function endpointDetails(value) {
   try {
@@ -15930,9 +15930,11 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
   const query = createQuotaQuery((input, request) => ctx.rpc(UsageQuota).query(input, request));
   const turns = /* @__PURE__ */ new Map();
   const observations = /* @__PURE__ */ new Map();
+  const lastClearedObservation = /* @__PURE__ */ new Map();
   const requests = /* @__PURE__ */ new WeakMap();
   const auxiliary = /* @__PURE__ */ new Map();
   let auxiliarySize = 0;
+  let nextObservationID = 0;
   const poisoned = /* @__PURE__ */ new Set();
   const busy = /* @__PURE__ */ new Set();
   const tickets = /* @__PURE__ */ new Map();
@@ -15989,6 +15991,7 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
       });
       if (attempts.length > TRACE_ATTEMPTS) attempts.splice(0, attempts.length - TRACE_ATTEMPTS);
       traces.set(id, attempts);
+      lastClearedObservation.delete(id);
       recordTrace(id, "prompt.begin", {});
     } catch {
     }
@@ -16012,8 +16015,40 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
     } catch {
     }
   };
+  const clearObservation = (id, reason) => {
+    const observed = observations.get(id);
+    if (!observed) return;
+    const cleared = {
+      id: observed.id,
+      reason,
+      agent: observed.agent,
+      model: observed.model,
+      kind: observed.kind,
+      sent: observed.sent ?? false,
+      status: observed.status ?? null,
+      ambiguous: observed.ambiguous,
+      at: clock()
+    };
+    if (!lastClearedObservation.has(id) && lastClearedObservation.size >= CAP) {
+      const oldest = lastClearedObservation.keys().next().value;
+      if (oldest) lastClearedObservation.delete(oldest);
+    }
+    lastClearedObservation.set(id, cleared);
+    recordTrace(id, "observation.cleared", {
+      observationID: cleared.id,
+      reason,
+      kind: cleared.kind,
+      agent: cleared.agent,
+      model: cleared.model,
+      sent: cleared.sent,
+      status: cleared.status,
+      ambiguous: cleared.ambiguous
+    });
+    observations.delete(id);
+  };
   const snapshot = (id, observed, turn) => ({
     observationPresent: !!observed,
+    observationID: observed?.id ?? null,
     observedKind: observed?.kind ?? null,
     observedAgent: observed?.agent ?? null,
     observedModel: observed?.model ?? null,
@@ -16027,20 +16062,36 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
     poisoned: poisoned.has(id),
     configurationCurrent: current()
   });
+  const clearedObservationDetails = (id) => {
+    const cleared = lastClearedObservation.get(id);
+    return {
+      lastClearedObservationID: cleared?.id ?? null,
+      lastObservationClearReason: cleared?.reason ?? null,
+      lastObservationClearAgeMs: cleared ? Math.max(0, Math.round(clock() - cleared.at)) : null
+    };
+  };
   const prune = () => {
     const cutoff = clock() - TTL;
     for (const [id, value] of observations) {
       if (value.at >= cutoff) continue;
       if (value.ambiguous || value.status === void 0 || value.status >= 400) poison(id);
-      observations.delete(id);
+      clearObservation(id, "ttl_expired");
     }
     for (const [id, value] of tickets) if (value.at < cutoff) tickets.delete(id);
   };
   const timer = setInterval(prune, TTL);
   timer.unref();
-  const stop = (id) => {
+  const stop = (id, reason = "unspecified") => {
+    const turn = turns.get(id);
+    if (turn)
+      recordTrace(id, "turn.cleared", {
+        reason,
+        agent: turn.agent,
+        model: key(turn.model),
+        switches: turn.switches
+      });
+    clearObservation(id, reason);
     turns.delete(id);
-    observations.delete(id);
     auxiliarySize -= auxiliary.get(id)?.size ?? 0;
     auxiliary.delete(id);
     poisoned.delete(id);
@@ -16054,6 +16105,13 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
     admissionSkipped(sessionID, reason, details = {}) {
       recordTrace(sessionID, "admission.skipped", { reason, ...details });
     },
+    admissionDecision(sessionID, result) {
+      recordTrace(sessionID, "quota.admission", {
+        outcome: result.outcome,
+        reason: result.reason,
+        ...result.details
+      });
+    },
     diagnostics(sessionID) {
       pruneTraces();
       return {
@@ -16065,7 +16123,7 @@ function createQuotaFallback(ctx, routes, admission, current, selected = () => {
       };
     },
     admit(id, agent, model) {
-      stop(id);
+      stop(id, "turn_admitted");
       if (turns.size < CAP) {
         turns.set(id, { agent, model, switches: 0, selected: false, generation: 0 });
         recordTrace(id, "turn.admitted", { agent, model: key(model) });
@@ -16157,6 +16215,7 @@ ${prompt}`),
         poison(event.sessionID);
       }
       const observed = {
+        id: ++nextObservationID,
         model: key(event.model),
         agent: event.agent,
         kind: event.kind,
@@ -16175,9 +16234,14 @@ ${prompt}`),
       } catch {
         observed.ambiguous = true;
       }
+      lastClearedObservation.delete(event.sessionID);
       observations.set(event.sessionID, observed);
       const base = endpointDetails(event.baseURL);
       recordTrace(event.sessionID, "model.request", {
+        observationID: observed.id,
+        previousObservationID: previous?.id ?? null,
+        previousObservationStatus: previous?.status ?? null,
+        previousObservationSent: previous?.sent ?? false,
         kind: event.kind,
         agent: event.agent,
         model: key(event.model),
@@ -16214,6 +16278,7 @@ ${prompt}`),
         const endpoint = endpointDetails(event.request.url);
         recordTrace(event.sessionID, "http.request.ignored", {
           reason: "no_model_request_observation",
+          ...clearedObservationDetails(event.sessionID),
           kind: event.kind,
           agent: event.agent,
           model: key(event.model),
@@ -16253,6 +16318,7 @@ ${prompt}`),
       observed.sent = true;
       requests.set(root, observed);
       recordTrace(event.sessionID, "http.request", {
+        observationID: observed.id,
         matched: matchSent && matchModel && matchAgent && matchKind && matchURL,
         provenance: root === event.request ? "native" : "rewritten_to_original",
         kind: event.kind,
@@ -16291,6 +16357,7 @@ ${prompt}`),
         const endpoint2 = endpointDetails(event.request.url);
         recordTrace(event.sessionID, "http.response.ignored", {
           reason: "no_model_request_observation",
+          ...clearedObservationDetails(event.sessionID),
           kind: event.kind,
           agent: event.agent,
           model: key(event.model),
@@ -16306,6 +16373,7 @@ ${prompt}`),
       } catch {
         observed.ambiguous = true;
         recordTrace(event.sessionID, "http.response", {
+          observationID: observed.id,
           matched: false,
           reason: "invalid_response_provenance",
           kind: event.kind,
@@ -16326,6 +16394,7 @@ ${prompt}`),
       else observed.status = event.response.status;
       const endpoint = endpointDetails(root.url);
       recordTrace(event.sessionID, "http.response", {
+        observationID: observed.id,
         matched: matchRequest && matchModel && matchAgent && matchKind,
         provenance: root === event.request ? "native" : "rewritten_to_original",
         kind: event.kind,
@@ -16383,7 +16452,7 @@ ${prompt}`),
       if (observed && (observed.agent !== event.agent || observed.model !== key(event.model)))
         return reject("retry_identity_does_not_match_observation");
       if (observed && (observed.ambiguous || observed.status === void 0)) poison(id);
-      observations.delete(id);
+      clearObservation(id, "retry_received_single_use");
       const turn = turns.get(id);
       const generation = turn?.generation;
       const live = () => !disposed && !saturated && !poisoned.has(id) && current() && turns.get(id) === turn && turn?.generation === generation && !!observed && !auxiliary.get(id)?.has(identity(observed.agent, observed.model)) && clock() - observed.at <= TTL;
@@ -16590,6 +16659,7 @@ ${prompt}`),
       query.dispose();
       turns.clear();
       observations.clear();
+      lastClearedObservation.clear();
       auxiliary.clear();
       auxiliarySize = 0;
       traces.clear();
@@ -16723,6 +16793,8 @@ function createQuotaAdmission(ctx, routes, current) {
   const options = parsed.success ? parsed.data : { enabled: false, allowPaidFallbacks: false };
   const query = createQuotaQuery((input, request) => ctx.rpc(UsageQuota).query(input, request));
   const owned = /* @__PURE__ */ new Map();
+  const lastControl = /* @__PURE__ */ new Map();
+  const lastOwnershipEvent = /* @__PURE__ */ new Map();
   const expected = /* @__PURE__ */ new Map();
   const busy = /* @__PURE__ */ new Set();
   const versions = /* @__PURE__ */ new Map();
@@ -16733,6 +16805,38 @@ function createQuotaAdmission(ctx, routes, current) {
   const reasons = /* @__PURE__ */ new Map();
   const freshness = /* @__PURE__ */ new Map();
   let disposed = false;
+  const remember = (map2, sessionID, value) => {
+    if (!map2.has(sessionID) && map2.size >= 1024) {
+      const oldest = map2.keys().next().value;
+      if (oldest) map2.delete(oldest);
+    }
+    map2.set(sessionID, value);
+  };
+  const ownershipDetails = (sessionID, session) => {
+    const owner = owned.get(sessionID);
+    const control = lastControl.get(sessionID);
+    const invalidation = lastOwnershipEvent.get(sessionID);
+    const model = key2(session.model);
+    return {
+      sessionAgent: session.agent ?? null,
+      sessionModel: model || null,
+      ownerPresent: !!owner,
+      ownerAgent: owner?.agent ?? null,
+      ownerModel: owner?.model || null,
+      ownerAgentMatches: !!owner && owner.agent === session.agent,
+      ownerModelMatches: model ? !!owner && owner.model === model : null,
+      lastControlAction: control?.action ?? null,
+      lastControlAgent: control?.agent ?? null,
+      lastControlModel: control?.model || null,
+      lastControlAgeMs: control ? Math.max(0, Date.now() - control.at) : null,
+      lastOwnershipEvent: invalidation?.event ?? null,
+      lastOwnershipEventOwnerPresent: invalidation?.ownerPresent ?? null,
+      lastOwnershipEventOwnerAgent: invalidation?.ownerAgent ?? null,
+      lastOwnershipEventOwnerModel: invalidation?.ownerModel ?? null,
+      lastOwnershipEventAgeMs: invalidation ? Math.max(0, Date.now() - invalidation.at) : null,
+      lastOwnershipEventAfterControl: !!control && !!invalidation && invalidation.at >= control.at
+    };
+  };
   const invalidate = (sessionID) => {
     if (busy.has(sessionID)) versions.set(sessionID, (versions.get(sessionID) ?? 0) + 1);
   };
@@ -16880,6 +16984,12 @@ function createQuotaAdmission(ctx, routes, current) {
           }
           if (!live()) throw new Error("Router stopped or session deleted during pinning.");
           reason(sessionID, "explicit_pin", (await ctx.session.get({ sessionID })).model);
+          remember(lastControl, sessionID, {
+            action,
+            agent: session.agent,
+            model: key2(session.model),
+            at: Date.now()
+          });
         } else {
           if (!owned.has(sessionID) && owned.size >= 1024)
             throw new Error("Automatic session capacity reached.");
@@ -16888,6 +16998,12 @@ function createQuotaAdmission(ctx, routes, current) {
           pinned.delete(sessionID);
           owned.set(sessionID, { agent: session.agent, model: key2(session.model) });
           reason(sessionID, "automatic_next_explicit_turn", session.model);
+          remember(lastControl, sessionID, {
+            action,
+            agent: session.agent,
+            model: key2(session.model),
+            at: Date.now()
+          });
         }
       } finally {
         controls.delete(sessionID);
@@ -16906,6 +17022,14 @@ function createQuotaAdmission(ctx, routes, current) {
         "session.execution.interrupted",
         "session.deleted"
       ].includes(type)) {
+        const previousOwner = owned.get(sessionID);
+        remember(lastOwnershipEvent, sessionID, {
+          event: type,
+          ownerPresent: !!previousOwner,
+          ownerAgent: previousOwner?.agent ?? null,
+          ownerModel: previousOwner?.model ?? null,
+          at: Date.now()
+        });
         owned.delete(sessionID);
         expected.delete(sessionID);
         invalidate(sessionID);
@@ -16914,37 +17038,87 @@ function createQuotaAdmission(ctx, routes, current) {
           pinned.delete(sessionID);
           reasons.delete(sessionID);
           freshness.delete(sessionID);
+          lastControl.delete(sessionID);
+          lastOwnershipEvent.delete(sessionID);
           return pinStore.remove(sessionID).then(() => false);
         }
       }
       return false;
     },
-    async main(sessionID, session, pending) {
-      if (disposed || !current() || session.parentID || !session.agent || busy.has(sessionID))
-        return;
-      if (busy.size >= 64) return;
+    async main(sessionID, session, pending, diagnostic) {
+      const report = (outcome, reason2, details = {}) => {
+        try {
+          diagnostic?.({
+            outcome,
+            reason: reason2,
+            details: { ...ownershipDetails(sessionID, session), ...details }
+          });
+        } catch {
+        }
+      };
+      const skip = (reason2, details = {}) => {
+        report("skipped", reason2, details);
+        return void 0;
+      };
+      if (disposed) return skip("router_disposed");
+      if (!current()) return skip("configuration_inactive");
+      if (session.parentID) return skip("child_session_not_main_admission");
+      if (!session.agent) return skip("session_agent_missing");
+      if (busy.has(sessionID)) return skip("session_admission_busy");
+      if (busy.size >= 64) return skip("admission_capacity_reached");
       busy.add(sessionID);
       const generation = versions.get(sessionID) ?? 0;
       try {
-        if (controls.has(sessionID) || await isPinned(sessionID)) return;
-        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || (versions.get(sessionID) ?? 0) !== generation)
-          return;
+        if (controls.has(sessionID)) return skip("routing_control_in_progress");
+        if (await isPinned(sessionID)) return skip("session_is_pinned");
+        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || (versions.get(sessionID) ?? 0) !== generation) {
+          return skip("admission_invalidated_before_route_check", {
+            disposed,
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation
+          });
+        }
         const route = routes[session.agent];
-        if (!route) return;
+        if (!route) return skip("agent_route_missing");
         const previous = owned.get(sessionID);
-        if (session.model && (!previous || previous.agent !== session.agent || previous.model !== key2(session.model)))
-          return;
-        if (!owned.has(sessionID) && owned.size >= 1024) return;
+        if (session.model && (!previous || previous.agent !== session.agent || previous.model !== key2(session.model))) {
+          return skip("current_model_not_owned", {
+            ownerAgentMatches: !!previous && previous.agent === session.agent,
+            ownerModelMatches: !!previous && previous.model === key2(session.model)
+          });
+        }
+        if (!owned.has(sessionID) && owned.size >= 1024) return skip("ownership_capacity_reached");
         const choose = await evaluate(route, pending, sessionID);
-        if (disposed || !current() || (versions.get(sessionID) ?? 0) !== generation) return;
+        if (disposed || !current() || (versions.get(sessionID) ?? 0) !== generation) {
+          return skip("admission_invalidated_during_quota_check", {
+            disposed,
+            configurationCurrent: current(),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation
+          });
+        }
         const latest = await ctx.session.get({ sessionID });
-        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || latest.agent !== session.agent || key2(latest.model) !== key2(session.model) || (versions.get(sessionID) ?? 0) !== generation || !current())
-          return;
+        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || latest.agent !== session.agent || key2(latest.model) !== key2(session.model) || (versions.get(sessionID) ?? 0) !== generation || !current()) {
+          return skip("session_changed_during_admission", {
+            latestAgentMatches: latest.agent === session.agent,
+            latestModelMatches: key2(latest.model) === key2(session.model),
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+            configurationCurrent: current()
+          });
+        }
         const decision = choose();
         const { choice } = decision;
         if (!choice) {
           reason(sessionID, decision.reason, session.model);
-          return;
+          return skip("no_eligible_quota_route", {
+            decisionReason: decision.reason,
+            routeCandidateCount: 1 + (route.fallbacks?.length ?? 0),
+            quotaPreflightEnabled: options.enabled,
+            allowPaidFallbacks: options.allowPaidFallbacks,
+            pendingFallback: !!pending
+          });
         }
         const model = {
           ...quotaCandidate(choice),
@@ -16954,15 +17128,39 @@ function createQuotaAdmission(ctx, routes, current) {
           expected.set(sessionID, key2(model));
           try {
             await ctx.session.switchModel({ sessionID, model });
-          } catch {
+          } catch (error51) {
             expected.delete(sessionID);
-            return;
+            return skip("native_model_switch_failed", {
+              selectedModel: key2(model),
+              errorName: error51 instanceof Error ? error51.name : "non_error_throw"
+            });
           }
         }
-        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || (versions.get(sessionID) ?? 0) !== generation)
-          return;
+        if (disposed || controls.has(sessionID) || pinned.has(sessionID) || (versions.get(sessionID) ?? 0) !== generation) {
+          return skip("admission_invalidated_after_model_switch", {
+            disposed,
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+            selectedModel: key2(model)
+          });
+        }
         owned.set(sessionID, { agent: session.agent, model: key2(model) });
         reason(sessionID, decision.reason, model);
+        report("selected", decision.reason, {
+          selectedAgent: session.agent,
+          selectedModel: key2(model),
+          primaryModel: key2(quotaCandidate(route)),
+          routeCandidateCount: 1 + (route.fallbacks?.length ?? 0),
+          quotaPreflightEnabled: options.enabled,
+          allowPaidFallbacks: options.allowPaidFallbacks,
+          pendingFallback: !!pending,
+          ownerPresent: true,
+          ownerAgent: session.agent,
+          ownerModel: key2(model),
+          ownerAgentMatches: true,
+          ownerModelMatches: true
+        });
         return model;
       } finally {
         busy.delete(sessionID);
@@ -16994,6 +17192,8 @@ function createQuotaAdmission(ctx, routes, current) {
       pinned.clear();
       reasons.clear();
       freshness.clear();
+      lastControl.clear();
+      lastOwnershipEvent.clear();
       await pinStore.drain();
     }
   };
@@ -17088,7 +17288,7 @@ async function setupV2(ctx) {
   const applyRoutingControl = async (sessionID, action) => {
     if (!quota) throw new Error("Quota-aware routing is not enabled.");
     await quota.control(sessionID, action, async () => {
-      quotaFallback?.stop(sessionID);
+      quotaFallback?.stop(sessionID, "routing_control");
       turns.delete(sessionID);
       kinds.delete(sessionID);
       await failover.event({
@@ -17166,7 +17366,7 @@ async function setupV2(ctx) {
         "session.execution.succeeded",
         "session.execution.failed"
       ].includes(event.type))
-        quotaFallback?.stop(sessionID);
+        quotaFallback?.stop(sessionID, event.type);
       if (!turns.has(sessionID)) continue;
       if (event.type === "session.model.selected") {
         const model = event.data.model;
@@ -17221,7 +17421,7 @@ async function setupV2(ctx) {
   }
   await ctx.session.hook("prompt", async (event) => {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
-    quotaFallback?.stop(event.sessionID);
+    quotaFallback?.stop(event.sessionID, "new_prompt");
     quotaFallback?.begin(event.sessionID, event.messageID);
     if (state() !== initial) {
       quotaFallback?.admissionSkipped(event.sessionID, "configuration_changed_before_admission");
@@ -17248,7 +17448,8 @@ async function setupV2(ctx) {
           providerID: pending.providerID,
           id: pending.modelID,
           variant: pending.variant
-        } : void 0
+        } : void 0,
+        (result) => quotaFallback?.admissionDecision(event.sessionID, result)
       );
       if (!selected || !session.agent || !routes[session.agent]) {
         quotaFallback?.admissionSkipped(

@@ -19,6 +19,12 @@ type Session = {
   model?: Model | undefined;
   parentID?: string | undefined;
 };
+type DiagnosticScalar = string | number | boolean | null;
+export type MainDiagnostic = {
+  outcome: "selected" | "skipped";
+  reason: string;
+  details: Record<string, DiagnosticScalar>;
+};
 const key = (model: Model | undefined) =>
   model
     ? `${model.providerID}/${model.id}#${model.variant === "default" ? "" : (model.variant ?? "")}`
@@ -37,6 +43,20 @@ export function createQuotaAdmission(
   // Lazy lookup tolerates service plugin ordering and absent query registrations.
   const query = createQuotaQuery((input, request) => ctx.rpc(UsageQuota).query(input, request));
   const owned = new Map<string, { agent: string; model: string }>();
+  const lastControl = new Map<
+    string,
+    { action: "pin" | "auto"; agent: string; model: string; at: number }
+  >();
+  const lastOwnershipEvent = new Map<
+    string,
+    {
+      event: string;
+      ownerPresent: boolean;
+      ownerAgent: string | null;
+      ownerModel: string | null;
+      at: number;
+    }
+  >();
   const expected = new Map<string, string>();
   const busy = new Set<string>();
   const versions = new Map<string, number>();
@@ -47,6 +67,39 @@ export function createQuotaAdmission(
   const reasons = new Map<string, string>();
   const freshness = new Map<string, { checkedAt: number | null; validUntil: number | null }>();
   let disposed = false;
+
+  const remember = <T>(map: Map<string, T>, sessionID: string, value: T) => {
+    if (!map.has(sessionID) && map.size >= 1024) {
+      const oldest = map.keys().next().value;
+      if (oldest) map.delete(oldest);
+    }
+    map.set(sessionID, value);
+  };
+  const ownershipDetails = (sessionID: string, session: Session) => {
+    const owner = owned.get(sessionID);
+    const control = lastControl.get(sessionID);
+    const invalidation = lastOwnershipEvent.get(sessionID);
+    const model = key(session.model);
+    return {
+      sessionAgent: session.agent ?? null,
+      sessionModel: model || null,
+      ownerPresent: !!owner,
+      ownerAgent: owner?.agent ?? null,
+      ownerModel: owner?.model || null,
+      ownerAgentMatches: !!owner && owner.agent === session.agent,
+      ownerModelMatches: model ? !!owner && owner.model === model : null,
+      lastControlAction: control?.action ?? null,
+      lastControlAgent: control?.agent ?? null,
+      lastControlModel: control?.model || null,
+      lastControlAgeMs: control ? Math.max(0, Date.now() - control.at) : null,
+      lastOwnershipEvent: invalidation?.event ?? null,
+      lastOwnershipEventOwnerPresent: invalidation?.ownerPresent ?? null,
+      lastOwnershipEventOwnerAgent: invalidation?.ownerAgent ?? null,
+      lastOwnershipEventOwnerModel: invalidation?.ownerModel ?? null,
+      lastOwnershipEventAgeMs: invalidation ? Math.max(0, Date.now() - invalidation.at) : null,
+      lastOwnershipEventAfterControl: !!control && !!invalidation && invalidation.at >= control.at,
+    } satisfies Record<string, DiagnosticScalar>;
+  };
 
   const invalidate = (sessionID: string) => {
     if (busy.has(sessionID)) versions.set(sessionID, (versions.get(sessionID) ?? 0) + 1);
@@ -264,6 +317,12 @@ export function createQuotaAdmission(
           }
           if (!live()) throw new Error("Router stopped or session deleted during pinning.");
           reason(sessionID, "explicit_pin", (await ctx.session.get({ sessionID })).model);
+          remember(lastControl, sessionID, {
+            action,
+            agent: session.agent,
+            model: key(session.model),
+            at: Date.now(),
+          });
         } else {
           if (!owned.has(sessionID) && owned.size >= 1024)
             throw new Error("Automatic session capacity reached.");
@@ -272,6 +331,12 @@ export function createQuotaAdmission(
           pinned.delete(sessionID);
           owned.set(sessionID, { agent: session.agent, model: key(session.model) });
           reason(sessionID, "automatic_next_explicit_turn", session.model);
+          remember(lastControl, sessionID, {
+            action,
+            agent: session.agent,
+            model: key(session.model),
+            at: Date.now(),
+          });
         }
       } finally {
         controls.delete(sessionID);
@@ -292,6 +357,14 @@ export function createQuotaAdmission(
           "session.deleted",
         ].includes(type)
       ) {
+        const previousOwner = owned.get(sessionID);
+        remember(lastOwnershipEvent, sessionID, {
+          event: type,
+          ownerPresent: !!previousOwner,
+          ownerAgent: previousOwner?.agent ?? null,
+          ownerModel: previousOwner?.model ?? null,
+          at: Date.now(),
+        });
         owned.delete(sessionID);
         expected.delete(sessionID);
         // Only in-flight admissions need an invalidation generation.
@@ -301,37 +374,83 @@ export function createQuotaAdmission(
           pinned.delete(sessionID);
           reasons.delete(sessionID);
           freshness.delete(sessionID);
+          lastControl.delete(sessionID);
+          lastOwnershipEvent.delete(sessionID);
           return pinStore.remove(sessionID).then(() => false);
         }
       }
       return false;
     },
-    async main(sessionID: string, session: Session, pending?: Model): Promise<Model | undefined> {
-      if (disposed || !current() || session.parentID || !session.agent || busy.has(sessionID))
-        return;
-      if (busy.size >= 64) return;
+    async main(
+      sessionID: string,
+      session: Session,
+      pending?: Model,
+      diagnostic?: (result: MainDiagnostic) => void,
+    ): Promise<Model | undefined> {
+      const report = (
+        outcome: MainDiagnostic["outcome"],
+        reason: string,
+        details: Record<string, DiagnosticScalar> = {},
+      ) => {
+        try {
+          diagnostic?.({
+            outcome,
+            reason,
+            details: { ...ownershipDetails(sessionID, session), ...details },
+          });
+        } catch {
+          // Diagnostics must never affect routing.
+        }
+      };
+      const skip = (reason: string, details: Record<string, DiagnosticScalar> = {}) => {
+        report("skipped", reason, details);
+        return undefined;
+      };
+      if (disposed) return skip("router_disposed");
+      if (!current()) return skip("configuration_inactive");
+      if (session.parentID) return skip("child_session_not_main_admission");
+      if (!session.agent) return skip("session_agent_missing");
+      if (busy.has(sessionID)) return skip("session_admission_busy");
+      if (busy.size >= 64) return skip("admission_capacity_reached");
       busy.add(sessionID);
       const generation = versions.get(sessionID) ?? 0;
       try {
-        if (controls.has(sessionID) || (await isPinned(sessionID))) return;
+        if (controls.has(sessionID)) return skip("routing_control_in_progress");
+        if (await isPinned(sessionID)) return skip("session_is_pinned");
         if (
           disposed ||
           controls.has(sessionID) ||
           pinned.has(sessionID) ||
           (versions.get(sessionID) ?? 0) !== generation
-        )
-          return;
+        ) {
+          return skip("admission_invalidated_before_route_check", {
+            disposed,
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+          });
+        }
         const route = routes[session.agent];
-        if (!route) return;
+        if (!route) return skip("agent_route_missing");
         const previous = owned.get(sessionID);
         if (
           session.model &&
           (!previous || previous.agent !== session.agent || previous.model !== key(session.model))
-        )
-          return;
-        if (!owned.has(sessionID) && owned.size >= 1024) return;
+        ) {
+          return skip("current_model_not_owned", {
+            ownerAgentMatches: !!previous && previous.agent === session.agent,
+            ownerModelMatches: !!previous && previous.model === key(session.model),
+          });
+        }
+        if (!owned.has(sessionID) && owned.size >= 1024) return skip("ownership_capacity_reached");
         const choose = await evaluate(route, pending, sessionID);
-        if (disposed || !current() || (versions.get(sessionID) ?? 0) !== generation) return;
+        if (disposed || !current() || (versions.get(sessionID) ?? 0) !== generation) {
+          return skip("admission_invalidated_during_quota_check", {
+            disposed,
+            configurationCurrent: current(),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+          });
+        }
         const latest = await ctx.session.get({ sessionID });
         if (
           disposed ||
@@ -341,13 +460,27 @@ export function createQuotaAdmission(
           key(latest.model) !== key(session.model) ||
           (versions.get(sessionID) ?? 0) !== generation ||
           !current()
-        )
-          return;
+        ) {
+          return skip("session_changed_during_admission", {
+            latestAgentMatches: latest.agent === session.agent,
+            latestModelMatches: key(latest.model) === key(session.model),
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+            configurationCurrent: current(),
+          });
+        }
         const decision = choose();
         const { choice } = decision;
         if (!choice) {
           reason(sessionID, decision.reason, session.model);
-          return;
+          return skip("no_eligible_quota_route", {
+            decisionReason: decision.reason,
+            routeCandidateCount: 1 + (route.fallbacks?.length ?? 0),
+            quotaPreflightEnabled: options.enabled,
+            allowPaidFallbacks: options.allowPaidFallbacks,
+            pendingFallback: !!pending,
+          });
         }
         const model = {
           ...quotaCandidate(choice),
@@ -361,9 +494,12 @@ export function createQuotaAdmission(
           expected.set(sessionID, key(model));
           try {
             await ctx.session.switchModel({ sessionID, model });
-          } catch {
+          } catch (error) {
             expected.delete(sessionID);
-            return;
+            return skip("native_model_switch_failed", {
+              selectedModel: key(model),
+              errorName: error instanceof Error ? error.name : "non_error_throw",
+            });
           }
         }
         if (
@@ -371,10 +507,31 @@ export function createQuotaAdmission(
           controls.has(sessionID) ||
           pinned.has(sessionID) ||
           (versions.get(sessionID) ?? 0) !== generation
-        )
-          return;
+        ) {
+          return skip("admission_invalidated_after_model_switch", {
+            disposed,
+            controlInProgress: controls.has(sessionID),
+            pinned: pinned.has(sessionID),
+            generationChanged: (versions.get(sessionID) ?? 0) !== generation,
+            selectedModel: key(model),
+          });
+        }
         owned.set(sessionID, { agent: session.agent, model: key(model) });
         reason(sessionID, decision.reason, model);
+        report("selected", decision.reason, {
+          selectedAgent: session.agent,
+          selectedModel: key(model),
+          primaryModel: key(quotaCandidate(route)),
+          routeCandidateCount: 1 + (route.fallbacks?.length ?? 0),
+          quotaPreflightEnabled: options.enabled,
+          allowPaidFallbacks: options.allowPaidFallbacks,
+          pendingFallback: !!pending,
+          ownerPresent: true,
+          ownerAgent: session.agent,
+          ownerModel: key(model),
+          ownerAgentMatches: true,
+          ownerModelMatches: true,
+        });
         return model;
       } finally {
         busy.delete(sessionID);
@@ -420,6 +577,8 @@ export function createQuotaAdmission(
       pinned.clear();
       reasons.clear();
       freshness.clear();
+      lastControl.clear();
+      lastOwnershipEvent.clear();
       await pinStore.drain();
     },
   };

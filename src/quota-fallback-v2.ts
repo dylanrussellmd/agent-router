@@ -14,7 +14,7 @@ import {
   quotaCandidate,
 } from "./core/quota-preflight.js";
 import type { RoutingEntry } from "./core/schema.js";
-import type { createQuotaAdmission } from "./quota-v2.js";
+import type { MainDiagnostic, createQuotaAdmission } from "./quota-v2.js";
 import { resolveOriginalRequest } from "./request-provenance.js";
 
 export const QuotaFallbackOptions = z
@@ -33,6 +33,7 @@ type Turn = {
   generation: number;
 };
 type Observation = {
+  id: number;
   model: string;
   agent: string;
   kind: string;
@@ -42,6 +43,17 @@ type Observation = {
   ambiguous: boolean;
   origin?: string;
   paths?: string[];
+};
+type ClearedObservation = {
+  id: number;
+  reason: string;
+  agent: string;
+  model: string;
+  kind: string;
+  sent: boolean;
+  status: number | null;
+  ambiguous: boolean;
+  at: number;
 };
 const key = (m: Model) =>
   `${m.providerID}/${m.id}#${m.variant === "default" ? "" : (m.variant ?? "")}`;
@@ -54,7 +66,7 @@ const clock = () => performance.now();
 const CAP = 1024;
 const TRACE_TTL = 30 * 60_000;
 const TRACE_ATTEMPTS = 4;
-const TRACE_EVENTS = 32;
+const TRACE_EVENTS = 64;
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 
 type TraceScalar = string | number | boolean | null;
@@ -98,6 +110,7 @@ export function createQuotaFallback(
   const query = createQuotaQuery((input, request) => ctx.rpc(UsageQuota).query(input, request));
   const turns = new Map<string, Turn>();
   const observations = new Map<string, Observation>();
+  const lastClearedObservation = new Map<string, ClearedObservation>();
   const requests = new WeakMap<Request, Observation>();
   // Retry lacks a request kind. Retain auxiliary identities for the admission:
   // only an auxiliary request with the same agent AND model is ambiguous.
@@ -105,6 +118,7 @@ export function createQuotaFallback(
   // title generation streams independently and does not invoke the retry hook.
   const auxiliary = new Map<string, Set<string>>();
   let auxiliarySize = 0;
+  let nextObservationID = 0;
   const poisoned = new Set<string>();
   const busy = new Set<string>();
   const tickets = new Map<
@@ -177,6 +191,7 @@ export function createQuotaFallback(
       });
       if (attempts.length > TRACE_ATTEMPTS) attempts.splice(0, attempts.length - TRACE_ATTEMPTS);
       traces.set(id, attempts);
+      lastClearedObservation.delete(id);
       recordTrace(id, "prompt.begin", {});
     } catch {
       // Diagnostics must never affect routing.
@@ -206,8 +221,40 @@ export function createQuotaFallback(
       // Diagnostics must never affect routing.
     }
   };
+  const clearObservation = (id: string, reason: string) => {
+    const observed = observations.get(id);
+    if (!observed) return;
+    const cleared: ClearedObservation = {
+      id: observed.id,
+      reason,
+      agent: observed.agent,
+      model: observed.model,
+      kind: observed.kind,
+      sent: observed.sent ?? false,
+      status: observed.status ?? null,
+      ambiguous: observed.ambiguous,
+      at: clock(),
+    };
+    if (!lastClearedObservation.has(id) && lastClearedObservation.size >= CAP) {
+      const oldest = lastClearedObservation.keys().next().value;
+      if (oldest) lastClearedObservation.delete(oldest);
+    }
+    lastClearedObservation.set(id, cleared);
+    recordTrace(id, "observation.cleared", {
+      observationID: cleared.id,
+      reason,
+      kind: cleared.kind,
+      agent: cleared.agent,
+      model: cleared.model,
+      sent: cleared.sent,
+      status: cleared.status,
+      ambiguous: cleared.ambiguous,
+    });
+    observations.delete(id);
+  };
   const snapshot = (id: string, observed?: Observation, turn?: Turn) => ({
     observationPresent: !!observed,
+    observationID: observed?.id ?? null,
     observedKind: observed?.kind ?? null,
     observedAgent: observed?.agent ?? null,
     observedModel: observed?.model ?? null,
@@ -221,21 +268,37 @@ export function createQuotaFallback(
     poisoned: poisoned.has(id),
     configurationCurrent: current(),
   });
+  const clearedObservationDetails = (id: string) => {
+    const cleared = lastClearedObservation.get(id);
+    return {
+      lastClearedObservationID: cleared?.id ?? null,
+      lastObservationClearReason: cleared?.reason ?? null,
+      lastObservationClearAgeMs: cleared ? Math.max(0, Math.round(clock() - cleared.at)) : null,
+    };
+  };
   const prune = () => {
     const cutoff = clock() - TTL;
     for (const [id, value] of observations) {
       if (value.at >= cutoff) continue;
       // Expiry revokes retry permission, never evidence of an unresolved overlap.
       if (value.ambiguous || value.status === undefined || value.status >= 400) poison(id);
-      observations.delete(id);
+      clearObservation(id, "ttl_expired");
     }
     for (const [id, value] of tickets) if (value.at < cutoff) tickets.delete(id);
   };
   const timer = setInterval(prune, TTL);
   timer.unref();
-  const stop = (id: string) => {
+  const stop = (id: string, reason = "unspecified") => {
+    const turn = turns.get(id);
+    if (turn)
+      recordTrace(id, "turn.cleared", {
+        reason,
+        agent: turn.agent,
+        model: key(turn.model),
+        switches: turn.switches,
+      });
+    clearObservation(id, reason);
     turns.delete(id);
-    observations.delete(id);
     auxiliarySize -= auxiliary.get(id)?.size ?? 0;
     auxiliary.delete(id);
     poisoned.delete(id);
@@ -253,6 +316,13 @@ export function createQuotaFallback(
     ) {
       recordTrace(sessionID, "admission.skipped", { reason, ...details });
     },
+    admissionDecision(sessionID: string, result: MainDiagnostic) {
+      recordTrace(sessionID, "quota.admission", {
+        outcome: result.outcome,
+        reason: result.reason,
+        ...result.details,
+      });
+    },
     diagnostics(sessionID: string) {
       pruneTraces();
       return {
@@ -264,7 +334,7 @@ export function createQuotaFallback(
       };
     },
     admit(id: string, agent: string, model: Model) {
-      stop(id);
+      stop(id, "turn_admitted");
       if (turns.size < CAP) {
         turns.set(id, { agent, model, switches: 0, selected: false, generation: 0 });
         recordTrace(id, "turn.admitted", { agent, model: key(model) });
@@ -407,6 +477,7 @@ export function createQuotaFallback(
         poison(event.sessionID);
       }
       const observed: Observation = {
+        id: ++nextObservationID,
         model: key(event.model),
         agent: event.agent,
         kind: event.kind,
@@ -432,9 +503,14 @@ export function createQuotaFallback(
       } catch {
         observed.ambiguous = true;
       }
+      lastClearedObservation.delete(event.sessionID);
       observations.set(event.sessionID, observed);
       const base = endpointDetails(event.baseURL);
       recordTrace(event.sessionID, "model.request", {
+        observationID: observed.id,
+        previousObservationID: previous?.id ?? null,
+        previousObservationStatus: previous?.status ?? null,
+        previousObservationSent: previous?.sent ?? false,
         kind: event.kind,
         agent: event.agent,
         model: key(event.model),
@@ -471,6 +547,7 @@ export function createQuotaFallback(
         const endpoint = endpointDetails(event.request.url);
         recordTrace(event.sessionID, "http.request.ignored", {
           reason: "no_model_request_observation",
+          ...clearedObservationDetails(event.sessionID),
           kind: event.kind,
           agent: event.agent,
           model: key(event.model),
@@ -521,6 +598,7 @@ export function createQuotaFallback(
       observed.sent = true;
       requests.set(root, observed);
       recordTrace(event.sessionID, "http.request", {
+        observationID: observed.id,
         matched: matchSent && matchModel && matchAgent && matchKind && matchURL,
         provenance: root === event.request ? "native" : "rewritten_to_original",
         kind: event.kind,
@@ -559,6 +637,7 @@ export function createQuotaFallback(
         const endpoint = endpointDetails(event.request.url);
         recordTrace(event.sessionID, "http.response.ignored", {
           reason: "no_model_request_observation",
+          ...clearedObservationDetails(event.sessionID),
           kind: event.kind,
           agent: event.agent,
           model: key(event.model),
@@ -577,6 +656,7 @@ export function createQuotaFallback(
         // Invalid provenance is never trusted to resolve an observation.
         observed.ambiguous = true;
         recordTrace(event.sessionID, "http.response", {
+          observationID: observed.id,
           matched: false,
           reason: "invalid_response_provenance",
           kind: event.kind,
@@ -597,6 +677,7 @@ export function createQuotaFallback(
       else observed.status = event.response.status;
       const endpoint = endpointDetails(root.url);
       recordTrace(event.sessionID, "http.response", {
+        observationID: observed.id,
         matched: matchRequest && matchModel && matchAgent && matchKind,
         provenance: root === event.request ? "native" : "rewritten_to_original",
         kind: event.kind,
@@ -656,7 +737,7 @@ export function createQuotaFallback(
       if (observed && (observed.agent !== event.agent || observed.model !== key(event.model)))
         return reject("retry_identity_does_not_match_observation");
       if (observed && (observed.ambiguous || observed.status === undefined)) poison(id);
-      observations.delete(id); // Single-use evidence, including noneligible failures.
+      clearObservation(id, "retry_received_single_use"); // Evidence is single-use, even if ineligible.
       const turn = turns.get(id);
       const generation = turn?.generation;
       const live = () =>
@@ -884,6 +965,7 @@ export function createQuotaFallback(
       query.dispose();
       turns.clear();
       observations.clear();
+      lastClearedObservation.clear();
       auxiliary.clear();
       auxiliarySize = 0;
       traces.clear();

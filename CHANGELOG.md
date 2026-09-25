@@ -1,5 +1,6 @@
 # Unreleased
 
+- Expand bounded quota diagnostics with exact admission skip outcomes, recent Automatic-control/ownership invalidation context, and observation-clear reasons at the HTTP response boundary; no prompt or credential data is recorded.
 - Commit the built runtime bundles for direct Git installs, avoiding OpenCode's failing npm preparation pass for Git dependencies.
 - Add a native `/agent-routing` TUI command to inspect and change the current session's Automatic/Pinned mode without an LLM turn; scope its control RPC to the serving project location.
 - Preserve quota-fallback request correlation across trusted transport rewrites using bounded, in-process original-request provenance; unmarked replacements remain ineligible.

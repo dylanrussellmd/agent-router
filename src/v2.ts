@@ -117,7 +117,7 @@ export async function setupV2(ctx: Context) {
   const applyRoutingControl = async (sessionID: string, action: "pin" | "auto") => {
     if (!quota) throw new Error("Quota-aware routing is not enabled.");
     await quota.control(sessionID, action, async () => {
-      quotaFallback?.stop(sessionID);
+      quotaFallback?.stop(sessionID, "routing_control");
       turns.delete(sessionID);
       kinds.delete(sessionID);
       await failover.event({
@@ -204,7 +204,7 @@ export async function setupV2(ctx: Context) {
           "session.execution.failed",
         ].includes(event.type)
       )
-        quotaFallback?.stop(sessionID);
+        quotaFallback?.stop(sessionID, event.type);
       if (!turns.has(sessionID)) continue;
       if (event.type === "session.model.selected") {
         const model = event.data.model;
@@ -268,7 +268,7 @@ export async function setupV2(ctx: Context) {
   }
   await ctx.session.hook("prompt", async (event) => {
     if (turns.get(event.sessionID)?.id === event.messageID) return;
-    quotaFallback?.stop(event.sessionID);
+    quotaFallback?.stop(event.sessionID, "new_prompt");
     quotaFallback?.begin(event.sessionID, event.messageID);
     if (state() !== initial) {
       quotaFallback?.admissionSkipped(event.sessionID, "configuration_changed_before_admission");
@@ -300,6 +300,7 @@ export async function setupV2(ctx: Context) {
                   variant: pending.variant,
                 }
               : undefined,
+            (result) => quotaFallback?.admissionDecision(event.sessionID, result),
           );
       if (!selected || !session.agent || !routes[session.agent]) {
         quotaFallback?.admissionSkipped(

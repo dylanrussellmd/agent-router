@@ -172,6 +172,54 @@ describe("quota admission ownership", () => {
     expect(pause).toHaveBeenCalledTimes(2);
     f.admission.dispose();
   });
+  it("reports automatic ownership and the event that later invalidated it", async () => {
+    const f = fixture(true);
+    f.pin("primary");
+    await f.admission.control("s", "auto", async () => {});
+
+    const decisions: unknown[] = [];
+    const selected = await f.admission.main(
+      "s",
+      await f.ctx.session.get({ sessionID: "s" }),
+      undefined,
+      (decision) => decisions.push(decision),
+    );
+    expect(selected?.id).toBe("backup");
+    expect(decisions[0]).toMatchObject({
+      outcome: "selected",
+      reason: "known_exhaustion_fallback",
+      details: {
+        lastControlAction: "auto",
+        ownerPresent: true,
+        ownerAgentMatches: true,
+        ownerModelMatches: true,
+        selectedModel: "fixture/backup#",
+      },
+    });
+
+    f.pin("backup");
+    decisions.length = 0;
+    expect(
+      await f.admission.main(
+        "s",
+        await f.ctx.session.get({ sessionID: "s" }),
+        undefined,
+        (decision) => decisions.push(decision),
+      ),
+    ).toBeUndefined();
+    expect(decisions[0]).toMatchObject({
+      outcome: "skipped",
+      reason: "current_model_not_owned",
+      details: {
+        lastControlAction: "auto",
+        lastOwnershipEvent: "session.model.selected",
+        lastOwnershipEventOwnerPresent: true,
+        lastOwnershipEventAfterControl: true,
+        ownerPresent: false,
+      },
+    });
+    f.admission.dispose();
+  });
   it("freezes an unresolved native primary and restores durable pins after recreation", async () => {
     const f = fixture();
     await f.admission.control("s", "pin", async () => {});

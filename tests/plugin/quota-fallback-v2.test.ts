@@ -736,6 +736,36 @@ describe("bounded quota-fallback diagnostics", () => {
     });
   });
 
+  it("shows which lifecycle event cleared an observation before its HTTP response", async () => {
+    const f = await fixture();
+    const base = f.model();
+    const request = new Request("https://fixture.test/v1/chat/completions");
+    f.fallback.request({ ...base, request });
+    f.fallback.stop("s", "session.execution.failed");
+    f.fallback.response({ ...base, request, response: new Response(null, { status: 429 }) });
+
+    const events = f.fallback.diagnostics("s").attempts.at(-1)?.events ?? [];
+    expect(events.find((item) => item.event === "observation.cleared")).toMatchObject({
+      reason: "session.execution.failed",
+      kind: "primary",
+      status: null,
+      sent: true,
+    });
+    expect(events.find((item) => item.event === "http.response.ignored")).toMatchObject({
+      reason: "no_model_request_observation",
+      status: 429,
+      lastObservationClearReason: "session.execution.failed",
+      lastClearedObservationID: expect.any(Number),
+    });
+    expect(await f.fallback.retry(f.retry())).toBe(false);
+    expect(
+      f.fallback
+        .diagnostics("s")
+        .attempts.at(-1)
+        ?.events.find((item) => item.event === "retry.rejected"),
+    ).toMatchObject({ reason: "turn_not_admitted" });
+  });
+
   it("identifies an ambiguous original endpoint and retains bounded history across stop", async () => {
     const f = await fixture();
     const base = f.model();
