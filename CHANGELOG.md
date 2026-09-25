@@ -1,5 +1,6 @@
 # Unreleased
 
+- Build the distribution during Git dependency preparation so OpenCode can load the GitHub plugin without committed `dist/` artifacts.
 - Add a native `/agent-routing` TUI command to inspect and change the current session's Automatic/Pinned mode without an LLM turn; scope its control RPC to the serving project location.
 - Preserve quota-fallback request correlation across trusted transport rewrites using bounded, in-process original-request provenance; unmarked replacements remain ineligible.
 - Isolate auxiliary requests with distinct agent/model identities so title generation cannot overwrite primary quota evidence. Same-identity overlaps still fail closed.

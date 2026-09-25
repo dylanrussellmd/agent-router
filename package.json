@@ -42,6 +42,7 @@
   },
   "scripts": {
     "build": "tsup",
+    "prepare": "npm run build",
     "typecheck": "tsc --noEmit",
     "lint": "biome check src tests",
     "lint:fix": "biome check --write src tests",
